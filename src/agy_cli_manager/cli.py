@@ -552,6 +552,18 @@ def _usage_attr(meta: dict, selected: bool = False) -> int:
     return _severity_attr(_severity_from_remaining_percent(remaining), selected, bold=True)
 
 
+def _family_usage_attr(meta: dict, family: str, selected: bool = False) -> int:
+    windows = _family_usage_windows(meta, family)
+    values = []
+    for name in ("short", "weekly"):
+        window = windows.get(name) if isinstance(windows.get(name), dict) else {}
+        value = window.get("value")
+        if isinstance(value, (int, float)):
+            values.append(float(value))
+    remaining = min(values) if values else None
+    return _severity_attr(_severity_from_remaining_percent(remaining), selected, bold=True)
+
+
 def _reset_attr(meta: dict, now: datetime, selected: bool = False) -> int:
     windows = meta.get("usage_windows") if isinstance(meta.get("usage_windows"), dict) else {}
     reset_times = []
@@ -809,7 +821,9 @@ def _draw_action_bar(stdscr, y: int) -> int:
 
 
 def _detail_value_attr(selected_meta: dict, label: str, now_dt: datetime) -> int:
-    if label in {"Short Window", "Weekly Window"}:
+    if label in {"Other 5h", "Other Week"}:
+        return _family_usage_attr(selected_meta, "other")
+    if label in {"Short Window", "Weekly Window", "Gemini 5h", "Gemini Week"}:
         return _usage_attr(selected_meta)
     if label == "Health":
         return _state_attr(selected_meta.get("health_status", "unknown"))
@@ -989,6 +1003,7 @@ def _start_usage_refresh_worker(paths, name: str, result_queue: SimpleQueue) -> 
                     "ok": True,
                     "short_usage_value": result.short_usage_value,
                     "weekly_usage_value": result.weekly_usage_value,
+                    "usage_families": result.usage_families,
                 }
             )
         except Exception as exc:
@@ -1073,8 +1088,16 @@ def _format_next_refresh(meta: dict, now: datetime) -> str:
     return f"{seconds}s"
 
 
-def _format_window_summary(meta: dict, window_name: str, now: datetime) -> str:
-    windows = meta.get("usage_windows") if isinstance(meta.get("usage_windows"), dict) else {}
+def _family_usage_windows(meta: dict, family: str) -> dict:
+    families = meta.get("usage_families") if isinstance(meta.get("usage_families"), dict) else {}
+    windows = families.get(family) if isinstance(families.get(family), dict) else None
+    if windows is None and family == "gemini":
+        windows = meta.get("usage_windows") if isinstance(meta.get("usage_windows"), dict) else {}
+    return windows or {}
+
+
+def _format_window_summary(meta: dict, window_name: str, now: datetime, family: str = "gemini") -> str:
+    windows = _family_usage_windows(meta, family)
     window = windows.get(window_name) if isinstance(windows.get(window_name), dict) else {}
     value = window.get("value")
     status = window.get("status") or "unknown"
@@ -1401,9 +1424,14 @@ def _dashboard(stdscr, paths) -> int:
                     last_refresh = time.time()
                     short_value = refresh_event.get("short_usage_value")
                     weekly_value = refresh_event.get("weekly_usage_value")
+                    families = refresh_event.get("usage_families") or {}
+                    other_windows = families.get("other") if isinstance(families.get("other"), dict) else {}
+                    other_short_window = other_windows.get("short") if isinstance(other_windows.get("short"), dict) else {}
+                    other_short_value = other_short_window.get("value")
                     short_text = "-" if short_value is None else f"{short_value:.2f}%"
                     weekly_text = "-" if weekly_value is None else f"{weekly_value:.2f}%"
-                    message = f"Background refreshed {account_name}: {short_text}/{weekly_text}"
+                    other_text = "-" if other_short_value is None else f"{other_short_value:.2f}%"
+                    message = f"Background refreshed {account_name}: Gemini {short_text}/{weekly_text}, Other {other_text}"
                 else:
                     refresh_backoff_until[account_name] = time.time() + 60
                     message = f"Background refresh failed for {account_name}: {refresh_event.get('error', 'unknown error')}"
@@ -1478,7 +1506,8 @@ def _dashboard(stdscr, paths) -> int:
                 overview_rows = [
                     ("Account", selected_name, _selected_name_attr(selected_meta.get("status", "standby"), True)),
                     ("Usage", _format_usage(selected_meta), _usage_attr(selected_meta)),
-                    ("Quota", f"{_format_window_summary(selected_meta, 'short', now_dt)} | {_format_window_summary(selected_meta, 'weekly', now_dt)}", _detail_value_attr(selected_meta, "Short Window", now_dt)),
+                    ("Gemini", f"5h {_format_window_summary(selected_meta, 'short', now_dt, 'gemini')} | wk {_format_window_summary(selected_meta, 'weekly', now_dt, 'gemini')}", _detail_value_attr(selected_meta, "Gemini 5h", now_dt)),
+                    ("Other", f"5h {_format_window_summary(selected_meta, 'short', now_dt, 'other')} | wk {_format_window_summary(selected_meta, 'weekly', now_dt, 'other')}", _detail_value_attr(selected_meta, "Other 5h", now_dt)),
                     ("Problem", f"{verification.get('problem_status') or '-'} | {verification.get('recommended_action') or '-'}", _severity_attr("bad" if verification.get("problem_status") not in {None, 'ok', 'stale'} else "info")),
                     ("Issues", problem_summary.removeprefix("Issues: "), _problem_summary_attr(problem_counts)),
                 ]
@@ -1492,8 +1521,10 @@ def _dashboard(stdscr, paths) -> int:
                     ("Mode", f"{selected_meta.get('status', 'standby')} | {'enabled' if selected_meta.get('enabled', True) else 'disabled'}", _detail_value_attr(selected_meta, "State", now_dt)),
                     ("Failures", str(int(selected_meta.get('fail_count', 0) or 0)), _detail_value_attr(selected_meta, "Failures", now_dt)),
                     ("Next Refresh", f"{_format_next_refresh(selected_meta, now_dt)} | {int(selected_meta.get('refresh_policy_seconds', 0) or 0)}s", _detail_value_attr(selected_meta, "Next Refresh", now_dt)),
-                    ("Short Window", _format_window_summary(selected_meta, 'short', now_dt), _detail_value_attr(selected_meta, "Short Window", now_dt)),
-                    ("Weekly Window", _format_window_summary(selected_meta, 'weekly', now_dt), _detail_value_attr(selected_meta, "Weekly Window", now_dt)),
+                    ("Gemini 5h", _format_window_summary(selected_meta, 'short', now_dt, 'gemini'), _detail_value_attr(selected_meta, "Gemini 5h", now_dt)),
+                    ("Gemini Week", _format_window_summary(selected_meta, 'weekly', now_dt, 'gemini'), _detail_value_attr(selected_meta, "Gemini Week", now_dt)),
+                    ("Other 5h", _format_window_summary(selected_meta, 'short', now_dt, 'other'), _detail_value_attr(selected_meta, "Other 5h", now_dt)),
+                    ("Other Week", _format_window_summary(selected_meta, 'weekly', now_dt, 'other'), _detail_value_attr(selected_meta, "Other Week", now_dt)),
                     ("Problem", f"{verification.get('problem_status') or '-'} | {verification.get('recommended_action') or '-'}", _severity_attr("bad" if verification.get("problem_status") not in {None, 'ok', 'stale'} else "info")),
                     ("Problem Note", verification.get('summary') or '-', _severity_attr("bad" if verification.get("problem_status") not in {None, 'ok', 'stale'} else "info")),
                 ]
@@ -1506,8 +1537,8 @@ def _dashboard(stdscr, paths) -> int:
                     ("Mode", f"{selected_meta.get('status', 'standby')} | {'enabled' if selected_meta.get('enabled', True) else 'disabled'}", _detail_value_attr(selected_meta, "State", now_dt)),
                     ("Next Refresh", _format_next_refresh(selected_meta, now_dt), _detail_value_attr(selected_meta, "Next Refresh", now_dt)),
                     ("Problem", f"{verification.get('problem_status') or '-'} | {verification.get('recommended_action') or '-'}", _severity_attr("bad" if verification.get("problem_status") not in {None, 'ok', 'stale'} else "info")),
-                    ("Short", _format_window_summary(selected_meta, 'short', now_dt), _detail_value_attr(selected_meta, "Short Window", now_dt)),
-                    ("Weekly", _format_window_summary(selected_meta, 'weekly', now_dt), _detail_value_attr(selected_meta, "Weekly Window", now_dt)),
+                    ("Gemini", f"5h {_format_window_summary(selected_meta, 'short', now_dt, 'gemini')} | wk {_format_window_summary(selected_meta, 'weekly', now_dt, 'gemini')}", _detail_value_attr(selected_meta, "Gemini 5h", now_dt)),
+                    ("Other", f"5h {_format_window_summary(selected_meta, 'short', now_dt, 'other')} | wk {_format_window_summary(selected_meta, 'weekly', now_dt, 'other')}", _detail_value_attr(selected_meta, "Other 5h", now_dt)),
                     ("Note", verification.get('summary') or '-', _severity_attr("bad" if verification.get("problem_status") not in {None, 'ok', 'stale'} else "info")),
                 ]
         else:
@@ -2030,14 +2061,17 @@ def main() -> int:
                 "weekly_usage_status": result.weekly_usage_status,
                 "weekly_usage_value": result.weekly_usage_value,
                 "weekly_reset_at": result.weekly_reset_at,
+                "usage_families": result.usage_families,
                 "bucket_count": result.bucket_count,
             }
             if args.json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
                 short_value = "-" if result.short_usage_value is None else f"{result.short_usage_value:.2f}%"
+                other_short = result.usage_families["other"]["short"].get("value")
+                other_value = "-" if other_short is None else f"{other_short:.2f}%"
                 print(
-                    f"refreshed-usage: {result.account} short={short_value} "
+                    f"refreshed-usage: {result.account} gemini_5h={short_value} other_5h={other_value} "
                     f"reset_at={result.short_reset_at or '-'} buckets={result.bucket_count}"
                 )
             return 0
@@ -2070,14 +2104,17 @@ def main() -> int:
                 "weekly_usage_status": result.weekly_usage_status,
                 "weekly_usage_value": result.weekly_usage_value,
                 "weekly_reset_at": result.weekly_reset_at,
+                "usage_families": result.usage_families,
                 "bucket_count": result.bucket_count,
             }
             if args.json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
                 short_value = "-" if result.short_usage_value is None else f"{result.short_usage_value:.2f}%"
+                other_short = result.usage_families["other"]["short"].get("value")
+                other_value = "-" if other_short is None else f"{other_short:.2f}%"
                 print(
-                    f"refresh-due: {result.account} short={short_value} "
+                    f"refresh-due: {result.account} gemini_5h={short_value} other_5h={other_value} "
                     f"reset_at={result.short_reset_at or '-'} buckets={result.bucket_count}"
                 )
             return 0

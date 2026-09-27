@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- parse and persist separate Gemini and Claude/GPT-OSS quota families
+- show five-hour and weekly quota for both model families in the TUI
+
 ## v0.2.2 - 2026-09-21
 
 - add `agy-cli-manager watch` to tail Antigravity CLI logs and fail over on `Individual quota reached`

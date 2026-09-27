@@ -36,6 +36,7 @@ EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNO
 APPLY_AUTH_EMAIL_PATTERN = re.compile(r"applyAuthResult:\s+email=([^,\s]+)", re.IGNORECASE)
 DEFAULT_REFRESH_POLICY_SECONDS = 1800
 USAGE_WINDOW_NAMES = ("short", "weekly")
+USAGE_FAMILY_NAMES = ("gemini", "other")
 DEFAULT_SWITCH_MODE = "auto"
 VALID_SWITCH_MODES = ("auto", "manual")
 DEFAULT_REFRESH_FAILURE_SWITCH_THRESHOLD = 2
@@ -86,6 +87,7 @@ class UsageRefreshResult:
     weekly_usage_status: str
     weekly_usage_value: float | None
     weekly_reset_at: str | None
+    usage_families: dict
     bucket_count: int
 
 
@@ -522,19 +524,25 @@ def _default_usage_windows() -> dict:
     return {name: _default_usage_window() for name in USAGE_WINDOW_NAMES}
 
 
+def _normalize_window_map(raw_windows: object) -> dict:
+    windows = _default_usage_windows()
+    if not isinstance(raw_windows, dict):
+        return windows
+    for name in USAGE_WINDOW_NAMES:
+        raw = raw_windows.get(name)
+        if not isinstance(raw, dict):
+            continue
+        windows[name] = {
+            "status": raw.get("status", "unknown") or "unknown",
+            "value": raw.get("value"),
+            "reset_at": raw.get("reset_at"),
+        }
+    return windows
+
+
 def _normalize_usage_windows(meta: dict) -> dict:
     raw_windows = meta.get("usage_windows")
-    windows = _default_usage_windows()
-    if isinstance(raw_windows, dict):
-        for name in USAGE_WINDOW_NAMES:
-            raw = raw_windows.get(name)
-            if not isinstance(raw, dict):
-                continue
-            windows[name] = {
-                "status": raw.get("status", "unknown") or "unknown",
-                "value": raw.get("value"),
-                "reset_at": raw.get("reset_at"),
-            }
+    windows = _normalize_window_map(raw_windows)
 
     short_window = windows["short"]
     if short_window.get("value") is None and meta.get("usage_value") is not None:
@@ -546,8 +554,25 @@ def _normalize_usage_windows(meta: dict) -> dict:
     return windows
 
 
+def _default_usage_families() -> dict:
+    return {name: _default_usage_windows() for name in USAGE_FAMILY_NAMES}
+
+
+def _normalize_usage_families(meta: dict) -> dict:
+    raw_families = meta.get("usage_families")
+    families = _default_usage_families()
+    if isinstance(raw_families, dict):
+        for name in USAGE_FAMILY_NAMES:
+            families[name] = _normalize_window_map(raw_families.get(name))
+    if not isinstance(raw_families, dict) or not isinstance(raw_families.get("gemini"), dict):
+        families["gemini"] = _normalize_usage_windows(meta)
+    return families
+
+
 def _sync_legacy_usage_fields(meta: dict) -> None:
-    windows = _normalize_usage_windows(meta)
+    families = _normalize_usage_families(meta)
+    meta["usage_families"] = families
+    windows = families["gemini"]
     meta["usage_windows"] = windows
     short_window = windows["short"]
     meta["usage_status"] = short_window.get("status", "unknown")
@@ -774,25 +799,55 @@ def _select_quota_summary_group(summary_response: dict) -> dict | None:
     return normalized[0]
 
 
-def _parse_quota_windows_from_summary(summary_response: dict) -> tuple[dict, dict, int]:
-    group = _select_quota_summary_group(summary_response)
-    if not isinstance(group, dict):
-        return _default_usage_window(), _default_usage_window(), 0
+def _quota_group_family(group: dict) -> str | None:
     buckets = group.get("buckets")
-    if not isinstance(buckets, list):
-        return _default_usage_window(), _default_usage_window(), 0
+    if isinstance(buckets, list):
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            bucket_id = str(bucket.get("bucketId") or "").lower()
+            if bucket_id.startswith("gemini-"):
+                return "gemini"
+            if bucket_id.startswith("3p-"):
+                return "other"
+    label = " ".join(
+        str(group.get(key) or "") for key in ("displayName", "description")
+    ).lower()
+    if "gemini" in label:
+        return "gemini"
+    if "claude" in label or "gpt" in label:
+        return "other"
+    return None
 
-    short_window = _default_usage_window()
-    weekly_window = _default_usage_window()
-    for bucket in buckets:
-        if not isinstance(bucket, dict):
+
+def _parse_quota_families_from_summary(summary_response: dict) -> tuple[dict, int]:
+    families = _default_usage_families()
+    groups = summary_response.get("groups")
+    if not isinstance(groups, list):
+        return families, 0
+    bucket_count = 0
+    for group in groups:
+        if not isinstance(group, dict):
             continue
-        window_name = bucket.get("window")
-        if window_name == "5h":
-            short_window = _parse_summary_bucket(bucket)
-        elif window_name == "weekly":
-            weekly_window = _parse_summary_bucket(bucket)
-    return short_window, weekly_window, len(buckets)
+        family = _quota_group_family(group)
+        buckets = group.get("buckets")
+        if family not in USAGE_FAMILY_NAMES or not isinstance(buckets, list):
+            continue
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            bucket_count += 1
+            window_name = bucket.get("window")
+            if window_name == "5h":
+                families[family]["short"] = _parse_summary_bucket(bucket)
+            elif window_name == "weekly":
+                families[family]["weekly"] = _parse_summary_bucket(bucket)
+    return families, bucket_count
+
+
+def _parse_quota_windows_from_summary(summary_response: dict) -> tuple[dict, dict, int]:
+    families, bucket_count = _parse_quota_families_from_summary(summary_response)
+    return families["gemini"]["short"], families["gemini"]["weekly"], bucket_count
 
 
 def _resolve_usage_refresh_target(paths: ManagerPaths, state: dict, name: str | None) -> tuple[str, Path]:
@@ -1269,7 +1324,9 @@ def refresh_account_usage(
             raise ValueError("Cloud Code project id is unavailable.")
 
         quota_response = _cloudcode_request(access_token, CODE_ASSIST_QUOTA_SUMMARY_PATH, {"project": project_id})
-        short_window, weekly_window, bucket_count = _parse_quota_windows_from_summary(quota_response)
+        usage_families, bucket_count = _parse_quota_families_from_summary(quota_response)
+        short_window = usage_families["gemini"]["short"]
+        weekly_window = usage_families["gemini"]["weekly"]
         plan_info = load_response.get("planInfo")
         plan_type = plan_info.get("planType") if isinstance(plan_info, dict) else None
         monthly = plan_info.get("monthlyPromptCredits") if isinstance(plan_info, dict) else None
@@ -1288,6 +1345,7 @@ def refresh_account_usage(
             weekly_usage_status=weekly_window.get("status", "unknown"),
             weekly_usage_value=weekly_window.get("value"),
             weekly_reset_at=weekly_window.get("reset_at"),
+            usage_families=usage_families,
             bucket_count=bucket_count,
         )
 
@@ -1312,14 +1370,7 @@ def refresh_account_usage(
                 saved_token = _oauth_token_path(source_home)
                 if live_token.is_file() and saved_token.is_file() and live_token.read_bytes() == initial_live_token:
                     shutil.copy2(saved_token, live_token)
-            windows = _normalize_usage_windows(meta)
-            windows["short"]["status"] = result.short_usage_status
-            windows["short"]["value"] = result.short_usage_value
-            windows["short"]["reset_at"] = result.short_reset_at
-            windows["weekly"]["status"] = result.weekly_usage_status
-            windows["weekly"]["value"] = result.weekly_usage_value
-            windows["weekly"]["reset_at"] = result.weekly_reset_at
-            meta["usage_windows"] = windows
+            meta["usage_families"] = result.usage_families
             meta["health_status"] = "healthy"
             meta["last_live_check_at"] = _normalize_timestamp(refreshed_at)
             meta["last_live_check_error"] = None

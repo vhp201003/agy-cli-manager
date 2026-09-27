@@ -187,3 +187,41 @@ class ManagerRegressionTests(unittest.TestCase):
         self.assertEqual(m.load_state(self.paths)["active"], "a")
         self.assertEqual(self.token(self.live_home).read_text(encoding="utf-8"), "token-a")
         self.assertEqual(self.token(m.account_dir(self.paths, "b")).read_text(encoding="utf-8"), "token-b")
+
+    def test_quota_summary_preserves_gemini_and_other_families(self) -> None:
+        summary = {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.5, "resetTime": "2026-09-27T19:20:24Z"},
+                        {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.25, "resetTime": "2026-09-29T06:06:04Z"},
+                    ],
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                    "buckets": [
+                        {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.75, "resetTime": "2026-09-27T19:20:24Z"},
+                        {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 1.0, "resetTime": "2026-10-04T14:20:24Z"},
+                    ],
+                },
+            ]
+        }
+        families, bucket_count = m._parse_quota_families_from_summary(summary)
+        self.assertEqual(bucket_count, 4)
+        self.assertEqual(families["gemini"]["short"]["value"], 50.0)
+        self.assertEqual(families["gemini"]["weekly"]["value"], 25.0)
+        self.assertEqual(families["other"]["short"]["value"], 75.0)
+        self.assertEqual(families["other"]["weekly"]["value"], 100.0)
+
+    def test_legacy_usage_windows_migrate_to_gemini_family(self) -> None:
+        meta = {
+            "usage_windows": {
+                "short": {"status": "known", "value": 42.0, "reset_at": None},
+                "weekly": {"status": "known", "value": 84.0, "reset_at": None},
+            }
+        }
+        m._sync_legacy_usage_fields(meta)
+        self.assertEqual(meta["usage_families"]["gemini"], meta["usage_windows"])
+        self.assertEqual(meta["usage_families"]["other"]["short"]["status"], "unknown")

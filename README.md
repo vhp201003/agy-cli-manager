@@ -39,6 +39,7 @@ Project links:
 - supports both manual-only and automatic failover switching modes
 - prefers fuller, healthier standby accounts when auto-switching
 - tracks cached identity, health, and usage metadata
+- tracks separate Gemini and Claude/GPT-OSS five-hour and weekly quota pools
 - tracks live switch coordinator state for callers that need to wait on failover
 - exposes CLI commands and JSON output for automation
 - supports account failover with cooldowns and lock-protected state changes
@@ -337,7 +338,7 @@ Cached runtime metadata:
 
 - usage/reset/health data is persisted in manager state
 - the dashboard list currently uses the short window for its usage and countdown columns
-- the selected-account panel shows both the short window and a reserved weekly window slot
+- the selected-account panel shows five-hour and weekly quota for both Gemini and Claude/GPT-OSS model families
 - on relaunch, the dashboard reuses cached metadata immediately
 - countdowns and freshness are recalculated locally from saved timestamps
 - external apps should update this metadata after real checks or real requests
