@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
   <title id="title">agy-cli-manager terminal screenshot</title>
-  <desc id="desc">Sanitized terminal-style screenshot matching the real agy-cli-manager dashboard layout, with email addresses masked.</desc>
+  <desc id="desc">Sanitized terminal-style screenshot matching the real agy-cli-manager dashboard layout, including separate Gemini and Claude/GPT model-family quota windows.</desc>
   <style>
     .mono { font-family: "DejaVu Sans Mono", "SFMono-Regular", Consolas, monospace; }
     .fg { fill: #f2f6fb; }
@@ -73,14 +73,14 @@
   <text x="52" y="622" class="mono line magenta">Overview</text>
   <text x="52" y="656" class="mono line fg">Account: <tspan class="cyan">acct-primary</tspan>              Mode: <tspan class="cyan">active</tspan> | enabled      Health: <tspan class="green">healthy</tspan>           Usage: <tspan class="green">100%/99%</tspan></text>
 
-  <text x="52" y="706" class="mono line fg">Account                                                    Quota</text>
-  <text x="52" y="740" class="mono line fg">Identity: [masked]                                           Short Window: <tspan class="green">99.87</tspan> | <tspan class="green">4h55m</tspan></text>
-  <text x="52" y="774" class="mono line fg">Failures: 0                                                  Weekly Window: <tspan class="green">98.7</tspan> | <tspan class="green">118h30m</tspan></text>
-  <text x="52" y="808" class="mono line fg">Cooldown: -                                                  Live Error: <tspan class="muted">-</tspan></text>
-  <text x="52" y="842" class="mono line fg">Added: 2026-06-29T10:15:27.613507+00:00                      Last Error: -</text>
+  <text x="52" y="706" class="mono line fg">Account                                                    Model-family quota</text>
+  <text x="52" y="740" class="mono line fg">Identity: [masked]                                           Gemini 5h: <tspan class="green">99.87</tspan> | <tspan class="green">4h55m</tspan></text>
+  <text x="52" y="774" class="mono line fg">Failures: 0                                                  Gemini Week: <tspan class="yellow">58.34</tspan> | <tspan class="yellow">39h29m</tspan></text>
+  <text x="52" y="808" class="mono line fg">Cooldown: -                                                  Other 5h: <tspan class="green">100.00</tspan> | <tspan class="green">4h59m</tspan></text>
+  <text x="52" y="842" class="mono line fg">Added: 2026-06-29T10:15:27.613507+00:00                      Other Week: <tspan class="green">100.00</tspan> | <tspan class="green">167h59m</tspan></text>
   <text x="52" y="876" class="mono line fg">Last Check: <tspan class="blue">4m ago</tspan>                                           Policy: <tspan class="blue">auto on due + manual refresh</tspan></text>
-  <text x="52" y="910" class="mono line fg">Next Refresh: <tspan class="green">25m42s</tspan> | 1800s policy</text>
+  <text x="52" y="910" class="mono line fg">Next Refresh: <tspan class="green">25m42s</tspan> | 1800s policy                     Other: Claude/GPT</text>
 
   <text x="52" y="948" class="mono line muted">===============================================================================================================================</text>
-  <text x="52" y="978" class="mono line yellow">Status: Background refreshed acct-standby: 99.87%/99.05%</text>
+  <text x="52" y="978" class="mono line yellow">Status: Background refreshed acct-standby: Gemini 99.87% | Other 100.00%</text>
 </svg>
