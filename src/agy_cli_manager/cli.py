@@ -35,6 +35,7 @@ from agy_cli_manager.manager import (
     refresh_account_usage,
     refresh_due_account,
     refresh_account_identity,
+    resolve_route,
     rotate_after_failure,
     clear_account_proxy,
     set_live_dir,
@@ -94,14 +95,23 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("apply-active", help="Re-apply the current active account to runtime and live_dir")
     ensure_cmd = sub.add_parser("ensure-active", help="Evaluate switch policy and ensure there is a usable active account")
     ensure_cmd.add_argument("--force", action="store_true", help="Apply the policy even when switch mode is manual")
+    ensure_cmd.add_argument("--family", choices=("gemini", "other"), help="Require usable quota for this model family")
     ensure_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    resolve_cmd = sub.add_parser("resolve-route", help="Resolve and apply an account/model-family fallback route")
+    resolve_cmd.add_argument("--family", required=True, choices=("gemini", "other"), help="Preferred model family")
+    resolve_cmd.add_argument("--fallback-strategy", choices=("same-family-first", "same-account-first", "strict-family"))
+    resolve_cmd.add_argument("--force-switch", action="store_true", help="Apply an account switch even in manual mode")
+    resolve_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     switch_mode = sub.add_parser("switch-mode", help="Show or set account switching mode")
     switch_mode.add_argument("mode", nargs="?", choices=("auto", "manual"))
     switch_mode.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     switch_policy = sub.add_parser("switch-policy", help="Show or update account switching policy")
     switch_policy.add_argument("--short-threshold", type=float, dest="short_threshold")
+    switch_policy.add_argument("--gemini-threshold", type=float, dest="gemini_threshold")
+    switch_policy.add_argument("--other-threshold", type=float, dest="other_threshold")
     switch_policy.add_argument("--refresh-failure-threshold", type=int, dest="refresh_failure_threshold")
     switch_policy.add_argument("--candidate-strategy", choices=("balanced", "highest-short", "round-robin"))
+    switch_policy.add_argument("--family-fallback-strategy", choices=("same-family-first", "same-account-first", "strict-family"))
     switch_policy.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     refresh_usage = sub.add_parser("refresh-usage", help="Fetch real Cloud Code quota and persist cached usage metadata")
     refresh_usage.add_argument("name", nargs="?")
@@ -170,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     rotate.add_argument("--cooldown-minutes", type=int, default=60)
     rotate.add_argument("--live-dir")
     rotate.add_argument("--force-switch", action="store_true", help="Switch even if the manager is in manual mode")
+    rotate.add_argument("--family", choices=("gemini", "other"), help="Require the replacement account to have quota for this family")
     rotate.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     watch = sub.add_parser("watch", help="Watch Antigravity CLI logs and fail over on quota errors")
@@ -1978,7 +1989,7 @@ def main() -> int:
             print(f"applied-active: {active}")
             return 0
         if args.command == "ensure-active":
-            result = ensure_active_account(paths, force=args.force)
+            result = ensure_active_account(paths, force=args.force, required_family=args.family)
             snapshot = get_status_snapshot(paths)
             payload = {
                 "triggered": result.triggered,
@@ -1988,6 +1999,7 @@ def main() -> int:
                 "switched_to": result.switched_to,
                 "reason": result.reason,
                 "cooldown_minutes": result.cooldown_minutes,
+                "required_family": result.required_family,
                 "switch_runtime": snapshot.get("switch_runtime"),
             }
             if args.json:
@@ -2003,6 +2015,31 @@ def main() -> int:
                     print(f"ensure-active: {result.reason}")
                 else:
                     print("ensure-active: no action")
+            return 0
+        if args.command == "resolve-route":
+            result = resolve_route(
+                paths,
+                args.family,
+                fallback_strategy=args.fallback_strategy,
+                force_switch=args.force_switch,
+            )
+            payload = {
+                "preferred_family": result.preferred_family,
+                "selected_family": result.selected_family,
+                "previous_active": result.previous_active,
+                "active": result.active,
+                "switched_to": result.switched_to,
+                "recommended_account": result.recommended_account,
+                "fallback_strategy": result.fallback_strategy,
+                "outcome": result.outcome,
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(
+                    f"route: account={result.active or result.recommended_account or '-'} "
+                    f"family={result.selected_family or '-'} outcome={result.outcome}"
+                )
             return 0
         if args.command == "switch-mode":
             snapshot = get_status_snapshot(paths)
@@ -2024,8 +2061,11 @@ def main() -> int:
             snapshot = get_status_snapshot(paths)
             no_updates = (
                 args.short_threshold is None
+                and args.gemini_threshold is None
+                and args.other_threshold is None
                 and args.refresh_failure_threshold is None
                 and args.candidate_strategy is None
+                and args.family_fallback_strategy is None
             )
             if no_updates:
                 payload = snapshot.get("switch_policy", {})
@@ -2033,8 +2073,11 @@ def main() -> int:
                 payload = update_switch_policy(
                     paths,
                     short_usage_threshold_percent=args.short_threshold,
+                    gemini_usage_threshold_percent=args.gemini_threshold,
+                    other_usage_threshold_percent=args.other_threshold,
                     refresh_failure_threshold=args.refresh_failure_threshold,
                     candidate_strategy=args.candidate_strategy,
+                    family_fallback_strategy=args.family_fallback_strategy,
                 )
             if args.json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2201,6 +2244,7 @@ def main() -> int:
                 force_switch=args.force_switch,
                 trigger=args.trigger,
                 request_id=args.request_id,
+                required_family=args.family,
             )
             snapshot = get_status_snapshot(paths)
             if args.json:
@@ -2211,6 +2255,7 @@ def main() -> int:
                     "marked_bad": result.marked_bad,
                     "reason": result.reason,
                     "cooldown_minutes": result.cooldown_minutes,
+                    "required_family": args.family,
                     "switch_mode": snapshot.get("switch_mode", "auto"),
                     "outcome": result.outcome,
                     "switch_runtime": snapshot.get("switch_runtime"),

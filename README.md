@@ -162,11 +162,16 @@ agy-cli-manager status --json
 agy-cli-manager whoami
 agy-cli-manager models --json
 agy-cli-manager ensure-active --json
+agy-cli-manager ensure-active --family gemini --json
+agy-cli-manager ensure-active --family other --json
+agy-cli-manager resolve-route --family gemini --json
 agy-cli-manager switch-mode
 agy-cli-manager switch-mode manual
 agy-cli-manager switch-mode auto
 agy-cli-manager switch-policy --json
 agy-cli-manager switch-policy --short-threshold 10 --refresh-failure-threshold 2 --candidate-strategy balanced
+agy-cli-manager switch-policy --gemini-threshold 10 --other-threshold 10
+agy-cli-manager switch-policy --family-fallback-strategy same-family-first
 agy-cli-manager refresh-usage --json
 agy-cli-manager switch-next
 agy-cli-manager rotate-after-failure --reason quota --cooldown-minutes 60 --json
@@ -272,26 +277,36 @@ agy-cli-manager status --json
 agy-cli-manager current --json
 agy-cli-manager list --json
 agy-cli-manager ensure-active --json
+agy-cli-manager ensure-active --family other --json
+agy-cli-manager resolve-route --family gemini --fallback-strategy same-account-first --json
 agy-cli-manager switch-policy --json
 agy-cli-manager switch-policy --short-threshold 12.5 --refresh-failure-threshold 3 --candidate-strategy highest-short --json
 agy-cli-manager refresh-usage account1 --json
 agy-cli-manager refresh-due --json
 agy-cli-manager models --json
-agy-cli-manager rotate-after-failure --reason quota --cooldown-minutes 60 --json
+agy-cli-manager rotate-after-failure --reason quota --family other --cooldown-minutes 60 --json
 agy-cli-manager watch --once --json
 ```
 
 Typical external-app flow:
 
 1. read current state with `status --json`
-2. call `ensure-active --json` before sending real work if you want the manager to preflight the active account
+2. call `ensure-active --family gemini|other --json` before sending real work so the manager evaluates the quota pool the selected model will use
 3. read `switch_mode` and `switch_policy` to decide how aggressively your caller should auto-fail over
 4. use `models --json` if the caller needs model choices for the active account
 5. call `refresh-usage --json` or `refresh-due --json` only when needed
-6. if a real request fails due to auth/quota, call `rotate-after-failure --json`
+6. if a real request fails due to quota, call `rotate-after-failure --family gemini|other --json`; omit the family only when it is genuinely unknown
 7. inspect `switch_runtime` or wait briefly until it leaves `switching`
 8. retry the real request once on the new active account
 9. persist caller-side observations back with `update-meta`
+
+For a chatbox/load-balancer caller, `resolve-route` implements the family/account matrix and returns `selected_family` plus the active account:
+
+- `same-family-first` (default): current account/preferred family, another account/preferred family, current account/other family, then another account/other family
+- `same-account-first`: current account/preferred family, current account/other family, another account/preferred family, then another account/other family
+- `strict-family`: never cross to the other model family
+
+The manager applies an allowed account switch. It does not select a concrete model inside `agy`; the caller uses `selected_family` to choose the model. In manual switch mode, a route that needs another account returns `outcome=switch_required` and `recommended_account` unless `--force-switch` is supplied.
 
 Notes:
 
@@ -302,10 +317,11 @@ Notes:
 - `agy-cli-manager login` prompts for the account name if you do not pass one
 - `switch-next` skips accounts in cooldown.
 - `mark-bad` clears the active pointer if that account was active.
-- `ensure-active` evaluates the current policy and can automatically recover from no active account, known low 5-hour quota, auth missing, or repeated refresh failures.
+- `ensure-active --family gemini|other` evaluates the requested model family's five-hour and weekly quota and can recover from no active account, known low quota, auth missing, or repeated refresh failures. Omitting `--family` preserves the legacy Gemini-oriented behavior.
 - `ensure-active` returns JSON with `switch_runtime`, so callers can see whether the manager is idle, switching, ready, or has no standby account available.
 - `switch-mode` controls whether `rotate-after-failure` automatically moves to the next eligible standby account or stops after marking the active account bad.
-- `switch-policy` controls the proactive short-window threshold, refresh-failure threshold, and standby candidate ranking strategy.
+- `switch-policy` controls per-family proactive short-window thresholds, refresh-failure threshold, and standby candidate ranking strategy. `--short-threshold` sets both families; `--gemini-threshold` and `--other-threshold` override them independently.
+- `family_fallback_strategy` controls whether routing preserves the requested family, preserves the current account, or forbids cross-family fallback.
 - state and switching are protected by a single lock file so a caller can safely trigger failover from another process.
 - `set-live-dir` lets the manager drive a real CLI home in addition to its own internal `runtime/`.
 - the manager currently copies the managed profile under `.gemini/`, centered on the Antigravity auth/token artifacts it needs for switching.
@@ -319,10 +335,10 @@ Notes:
 - `watch` tails `live_dir/antigravity-cli/log/` (and `cli.log`) for `RESOURCE_EXHAUSTED (code 429): Individual quota reached` and weekly quota lines. It starts at end-of-file so historical quota errors are not replayed.
 - in `auto` mode, `watch` and the dashboard log poll call `rotate-after-failure` with `trigger=log-watch`. In `manual` mode they report the error and leave the active account in place unless `--force-switch` is set.
 - a switched profile is on disk (and in the live CLI home) immediately; a running `agy` process must be restarted to pick up the new token.
-- in `auto` mode, `ensure-active` and `refresh-usage`/`refresh-due` can proactively switch away from an active account when the cached 5-hour window falls to the configured `short_usage_threshold_percent`, auth is missing, or refresh failures reach the configured threshold.
+- in `auto` mode, `ensure-active --family ...` can proactively switch away when either that family's cached five-hour or weekly window falls to its configured threshold. A family-specific quota failure records only a `family_cooldowns` entry; it does not globally cool down an account whose other model family remains usable.
 - cached quota is advisory; real runtime failure is still the final authority for callers such as bots.
-- when auto-switching, the manager ranks the standby pool and prefers accounts with better health and more remaining short-window quota instead of simply taking the first account by name.
-- the default switch policy is `short_usage_threshold_percent=10`, `refresh_failure_threshold=2`, `candidate_strategy=balanced`.
+- when auto-switching for a requested family, the manager rejects candidates known to be depleted in that family, then ranks the remaining pool by health and that family's remaining quota. Unknown quota stays eligible but ranks behind known usable quota.
+- the default switch policy uses a 10% threshold for both families, `refresh_failure_threshold=2`, and `candidate_strategy=balanced`.
 - `rotate-after-failure` is the public failover operation for external apps: mark the current active account bad, optionally put it in cooldown, then switch to the next eligible standby account.
 - `rotate-after-failure` is idempotent across a short dedupe window and reports an `outcome` such as `switched`, `already_switched`, or `no_candidate`.
 - `switch_runtime` is persisted in state so a caller can coordinate retry logic without racing another caller into a second switch.
@@ -377,13 +393,14 @@ Public Python API:
 - `get_status_snapshot(paths)`
 - `get_switch_policy(paths)`
 - `update_switch_policy(paths, ...)`
-- `ensure_active_account(paths, force=False)`
+- `ensure_active_account(paths, force=False, required_family=None)`
+- `resolve_route(paths, preferred_family, fallback_strategy=None, force_switch=False)`
 - `list_models(paths, name=None, ...)`
 - `refresh_account_usage(paths, name=None, ...)`
 - `refresh_due_account(paths, ...)`
 - `switch_account(paths, name)`
 - `switch_next(paths)`
-- `rotate_after_failure(paths, reason, cooldown_minutes=60, live_dir=None, force_switch=False)`
+- `rotate_after_failure(paths, reason, cooldown_minutes=60, live_dir=None, force_switch=False, required_family=None)`
 - `poll_quota_logs(paths, ...)`
 - `watch_quota_logs(paths, ...)`
 - `parse_quota_log_line(line)`

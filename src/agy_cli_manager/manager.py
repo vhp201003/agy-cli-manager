@@ -41,8 +41,12 @@ DEFAULT_SWITCH_MODE = "auto"
 VALID_SWITCH_MODES = ("auto", "manual")
 DEFAULT_REFRESH_FAILURE_SWITCH_THRESHOLD = 2
 DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT = 10.0
+DEFAULT_GEMINI_SWITCH_THRESHOLD_PERCENT = DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT
+DEFAULT_OTHER_SWITCH_THRESHOLD_PERCENT = DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT
 DEFAULT_CANDIDATE_STRATEGY = "balanced"
 VALID_CANDIDATE_STRATEGIES = ("balanced", "highest-short", "round-robin")
+DEFAULT_FAMILY_FALLBACK_STRATEGY = "same-family-first"
+VALID_FAMILY_FALLBACK_STRATEGIES = ("same-family-first", "same-account-first", "strict-family")
 DEFAULT_SWITCH_DEDUPE_SECONDS = 15
 DEFAULT_SWITCH_HISTORY_LIMIT = 20
 CODE_ASSIST_BASE_URL = "https://cloudcode-pa.googleapis.com"
@@ -100,6 +104,19 @@ class EnsureActiveResult:
     switched_to: str | None
     reason: str | None
     cooldown_minutes: int
+    required_family: str | None = None
+
+
+@dataclass
+class RouteResult:
+    preferred_family: str
+    selected_family: str | None
+    previous_active: str | None
+    active: str | None
+    switched_to: str | None
+    fallback_strategy: str
+    outcome: str
+    recommended_account: str | None = None
 
 
 def _parse_model_label(value: str) -> dict | None:
@@ -248,8 +265,13 @@ def get_switch_mode(state: dict) -> str:
 def _default_switch_policy() -> dict:
     return {
         "short_usage_threshold_percent": DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT,
+        "family_thresholds": {
+            "gemini": DEFAULT_GEMINI_SWITCH_THRESHOLD_PERCENT,
+            "other": DEFAULT_OTHER_SWITCH_THRESHOLD_PERCENT,
+        },
         "refresh_failure_threshold": DEFAULT_REFRESH_FAILURE_SWITCH_THRESHOLD,
         "candidate_strategy": DEFAULT_CANDIDATE_STRATEGY,
+        "family_fallback_strategy": DEFAULT_FAMILY_FALLBACK_STRATEGY,
     }
 
 
@@ -259,6 +281,14 @@ def _normalize_candidate_strategy(value: object) -> str:
         if normalized in VALID_CANDIDATE_STRATEGIES:
             return normalized
     return DEFAULT_CANDIDATE_STRATEGY
+
+
+def _normalize_family_fallback_strategy(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in VALID_FAMILY_FALLBACK_STRATEGIES:
+            return normalized
+    return DEFAULT_FAMILY_FALLBACK_STRATEGY
 
 
 def _normalize_switch_policy(raw: object) -> dict:
@@ -273,6 +303,21 @@ def _normalize_switch_policy(raw: object) -> dict:
                     policy["short_usage_threshold_percent"] = threshold_value
         except (TypeError, ValueError):
             pass
+        shared_threshold = policy["short_usage_threshold_percent"]
+        family_thresholds = raw.get("family_thresholds")
+        normalized_family_thresholds = {
+            "gemini": shared_threshold,
+            "other": shared_threshold,
+        }
+        if isinstance(family_thresholds, dict):
+            for family in USAGE_FAMILY_NAMES:
+                try:
+                    family_value = float(family_thresholds.get(family))
+                    if 0.0 <= family_value <= 100.0:
+                        normalized_family_thresholds[family] = family_value
+                except (TypeError, ValueError):
+                    pass
+        policy["family_thresholds"] = normalized_family_thresholds
         failure_threshold = raw.get("refresh_failure_threshold")
         try:
             if failure_threshold is not None:
@@ -282,11 +327,22 @@ def _normalize_switch_policy(raw: object) -> dict:
         except (TypeError, ValueError):
             pass
         policy["candidate_strategy"] = _normalize_candidate_strategy(raw.get("candidate_strategy"))
+        policy["family_fallback_strategy"] = _normalize_family_fallback_strategy(raw.get("family_fallback_strategy"))
     return policy
 
 
 def _state_switch_policy(state: dict) -> dict:
     return _normalize_switch_policy(state.get("switch_policy"))
+
+
+def _normalize_usage_family(value: object, *, allow_none: bool = False) -> str | None:
+    if value is None and allow_none:
+        return None
+    if isinstance(value, str):
+        family = value.strip().lower()
+        if family in USAGE_FAMILY_NAMES:
+            return family
+    raise ValueError(f"Usage family must be one of: {', '.join(USAGE_FAMILY_NAMES)}")
 
 
 def _default_proxy_config() -> dict:
@@ -316,6 +372,7 @@ def _default_switch_runtime() -> dict:
         "reason": None,
         "trigger": None,
         "request_id": None,
+        "required_family": None,
         "active": None,
         "previous_active": None,
         "last_started_at": None,
@@ -345,6 +402,7 @@ def _mark_switch_runtime(
     reason: str | None = None,
     trigger: str | None = None,
     request_id: str | None = None,
+    required_family: str | None = None,
     active: str | None = None,
     previous_active: str | None = None,
     started_at: str | None = None,
@@ -355,6 +413,7 @@ def _mark_switch_runtime(
     runtime["reason"] = reason
     runtime["trigger"] = trigger
     runtime["request_id"] = request_id
+    runtime["required_family"] = required_family
     runtime["active"] = active
     runtime["previous_active"] = previous_active
     if started_at is not None:
@@ -377,6 +436,7 @@ def _normalize_switch_history(raw: object) -> list[dict]:
                 "reason": item.get("reason") if isinstance(item.get("reason"), str) or item.get("reason") is None else str(item.get("reason")),
                 "trigger": item.get("trigger") if isinstance(item.get("trigger"), str) or item.get("trigger") is None else str(item.get("trigger")),
                 "request_id": item.get("request_id") if isinstance(item.get("request_id"), str) or item.get("request_id") is None else str(item.get("request_id")),
+                "required_family": item.get("required_family") if item.get("required_family") in USAGE_FAMILY_NAMES else None,
                 "previous_active": item.get("previous_active") if isinstance(item.get("previous_active"), str) or item.get("previous_active") is None else str(item.get("previous_active")),
                 "active": item.get("active") if isinstance(item.get("active"), str) or item.get("active") is None else str(item.get("active")),
                 "switched_to": item.get("switched_to") if isinstance(item.get("switched_to"), str) or item.get("switched_to") is None else str(item.get("switched_to")),
@@ -398,6 +458,7 @@ def _append_switch_history(
     switched_to: str | None,
     outcome: str | None,
     cooldown_minutes: int,
+    required_family: str | None = None,
     at: str | None = None,
 ) -> None:
     history = _normalize_switch_history(state.get("switch_history"))
@@ -407,6 +468,7 @@ def _append_switch_history(
             "reason": reason,
             "trigger": trigger,
             "request_id": request_id,
+            "required_family": required_family,
             "previous_active": previous_active,
             "active": active,
             "switched_to": switched_to,
@@ -927,29 +989,94 @@ def _eligible_switch_candidates(state: dict, exclude: str | None = None) -> list
     ]
 
 
-def _is_short_window_exhausted(meta: dict, now: datetime | None = None, *, threshold_percent: float = DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT) -> bool:
+def _usage_windows_for_family(meta: dict, family: str) -> dict:
+    normalized_family = _normalize_usage_family(family)
+    families = _normalize_usage_families(meta)
+    return families[normalized_family]
+
+
+def _is_short_window_exhausted(
+    meta: dict,
+    now: datetime | None = None,
+    *,
+    threshold_percent: float = DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT,
+    family: str = "gemini",
+) -> bool:
+    return _is_usage_window_exhausted(
+        meta,
+        "short",
+        now,
+        threshold_percent=threshold_percent,
+        family=family,
+    )
+
+
+def _is_usage_window_exhausted(
+    meta: dict,
+    window_name: str,
+    now: datetime | None = None,
+    *,
+    threshold_percent: float = DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT,
+    family: str = "gemini",
+) -> bool:
     current = now or utc_now()
-    windows = _normalize_usage_windows(meta)
-    short = windows.get("short", {})
-    if short.get("status") != "known":
+    windows = _usage_windows_for_family(meta, family)
+    window = windows.get(window_name, {})
+    if window.get("status") != "known":
         return False
-    value = _coerce_usage_value(short.get("value"))
+    value = _coerce_usage_value(window.get("value"))
     if value is None or value > threshold_percent:
         return False
-    reset_at = parse_timestamp(short.get("reset_at"))
+    reset_at = parse_timestamp(window.get("reset_at"))
     if reset_at is not None and reset_at <= current:
         return False
     return True
 
 
-def _cooldown_minutes_from_short_window(meta: dict, now: datetime | None = None) -> int:
+def _is_family_quota_exhausted(
+    meta: dict,
+    now: datetime | None = None,
+    *,
+    threshold_percent: float = DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT,
+    family: str = "gemini",
+) -> bool:
+    return any(
+        _is_usage_window_exhausted(
+            meta,
+            window_name,
+            now,
+            threshold_percent=threshold_percent,
+            family=family,
+        )
+        for window_name in USAGE_WINDOW_NAMES
+    )
+
+
+def _cooldown_minutes_from_family_quota(
+    meta: dict,
+    now: datetime | None = None,
+    *,
+    threshold_percent: float = DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT,
+    family: str = "gemini",
+) -> int:
     current = now or utc_now()
-    windows = _normalize_usage_windows(meta)
-    short = windows.get("short", {})
-    reset_at = parse_timestamp(short.get("reset_at"))
-    if reset_at is None or reset_at <= current:
+    windows = _usage_windows_for_family(meta, family)
+    blocking_resets = [
+        reset_at
+        for window_name in USAGE_WINDOW_NAMES
+        if _is_usage_window_exhausted(
+            meta,
+            window_name,
+            current,
+            threshold_percent=threshold_percent,
+            family=family,
+        )
+        for reset_at in [parse_timestamp(windows.get(window_name, {}).get("reset_at"))]
+        if reset_at is not None and reset_at > current
+    ]
+    if not blocking_resets:
         return 60
-    delta_seconds = max(60.0, (reset_at - current).total_seconds())
+    delta_seconds = max(60.0, (max(blocking_resets) - current).total_seconds())
     return max(1, int(math.ceil(delta_seconds / 60.0)))
 
 
@@ -971,8 +1098,8 @@ def _coerce_usage_value(value: object) -> float | None:
     return None
 
 
-def _candidate_usage_value(meta: dict, window_name: str) -> float | None:
-    windows = _normalize_usage_windows(meta)
+def _candidate_usage_value(meta: dict, window_name: str, *, family: str = "gemini") -> float | None:
+    windows = _usage_windows_for_family(meta, family)
     window = windows.get(window_name, {})
     if not isinstance(window, dict):
         return None
@@ -993,15 +1120,33 @@ def _candidate_health_priority(health: str) -> int:
     return order.get(health, 8)
 
 
-def _best_switch_candidate(paths: ManagerPaths, state: dict, *, exclude: str | None = None) -> str | None:
+def _family_cooldown_active(meta: dict, family: str, now: datetime | None = None) -> bool:
+    cooldowns = meta.get("family_cooldowns")
+    if not isinstance(cooldowns, dict):
+        return False
+    until = parse_timestamp(cooldowns.get(family))
+    return until is not None and until > (now or utc_now())
+
+
+def _best_switch_candidate(
+    paths: ManagerPaths,
+    state: dict,
+    *,
+    exclude: str | None = None,
+    required_family: str | None = None,
+) -> str | None:
     policy = _state_switch_policy(state)
     strategy = policy["candidate_strategy"]
-    threshold_percent = float(policy["short_usage_threshold_percent"])
+    family = _normalize_usage_family(required_family, allow_none=True)
+    threshold_percent = float(
+        policy["family_thresholds"].get(family, policy["short_usage_threshold_percent"])
+    )
     candidates = _eligible_switch_candidates(state, exclude=exclude)
     if not candidates:
         return None
 
     ranked: list[tuple[tuple[object, ...], str]] = []
+    current = utc_now()
     for name in candidates:
         meta = state["accounts"].get(name)
         if not isinstance(meta, dict):
@@ -1009,12 +1154,25 @@ def _best_switch_candidate(paths: ManagerPaths, state: dict, *, exclude: str | N
         health = _derive_health_status(paths, name, meta)
         if health in {"auth_missing", "auth_expired", "disabled", "cooldown"}:
             continue
+        if family is not None and _family_cooldown_active(meta, family, current):
+            continue
 
-        short_value = _candidate_usage_value(meta, "short")
-        weekly_value = _candidate_usage_value(meta, "weekly")
+        short_value = _candidate_usage_value(meta, "short", family=family or "gemini")
+        weekly_value = _candidate_usage_value(meta, "weekly", family=family or "gemini")
         short_known = short_value is not None
-        short_low = short_known and short_value <= threshold_percent
+        quota_low = _is_family_quota_exhausted(
+            meta,
+            current,
+            threshold_percent=threshold_percent,
+            family=family or "gemini",
+        )
         weekly_known = weekly_value is not None
+
+        # When a caller names the family it needs, never fail over onto an
+        # account already known to be exhausted for that same family. Unknown
+        # quota remains eligible, but ranks behind known usable quota.
+        if family is not None and quota_low:
+            continue
 
         if strategy == "highest-short":
             score = (
@@ -1029,14 +1187,14 @@ def _best_switch_candidate(paths: ManagerPaths, state: dict, *, exclude: str | N
         elif strategy == "round-robin":
             score = (
                 _candidate_health_priority(health),
-                0 if short_known and not short_low else 1,
+                0 if short_known and not quota_low else 1,
                 str(meta.get("created_at") or ""),
                 name.lower(),
             )
         else:
             score = (
                 _candidate_health_priority(health),
-                0 if short_known and not short_low else 1,
+                0 if short_known and not quota_low else 1,
                 0 if short_known else 1,
                 -(short_value if short_value is not None else -1.0),
                 0 if weekly_known else 1,
@@ -1053,6 +1211,104 @@ def _best_switch_candidate(paths: ManagerPaths, state: dict, *, exclude: str | N
 
     ranked.sort(key=lambda item: item[0])
     return ranked[0][1]
+
+
+def _account_can_serve_family(
+    paths: ManagerPaths,
+    name: str,
+    meta: dict,
+    family: str,
+    policy: dict,
+    now: datetime,
+) -> bool:
+    health = _derive_health_status(paths, name, meta)
+    if health in {"auth_missing", "auth_expired", "disabled", "cooldown"}:
+        return False
+    if _family_cooldown_active(meta, family, now):
+        return False
+    threshold = float(policy["family_thresholds"][family])
+    return not _is_family_quota_exhausted(meta, now, threshold_percent=threshold, family=family)
+
+
+def resolve_route(
+    paths: ManagerPaths,
+    preferred_family: str,
+    *,
+    fallback_strategy: str | None = None,
+    force_switch: bool = False,
+) -> RouteResult:
+    """Resolve and apply an account/family route for an external caller.
+
+    The manager applies an account switch when policy permits it, but only
+    returns the selected family. The caller remains responsible for selecting
+    a concrete model from that family.
+    """
+    family = _normalize_usage_family(preferred_family)
+    alternate = "other" if family == "gemini" else "gemini"
+    with manager_lock(paths):
+        state = sync_state_from_disk(paths, load_state(paths))
+        policy = _state_switch_policy(state)
+        strategy = (
+            _normalize_family_fallback_strategy(fallback_strategy)
+            if fallback_strategy is not None
+            else policy["family_fallback_strategy"]
+        )
+        if fallback_strategy is not None and strategy != fallback_strategy.strip().lower():
+            raise ValueError(f"Unsupported family fallback strategy: {fallback_strategy}")
+
+        previous = state.get("active")
+        current_meta = state["accounts"].get(previous) if previous else None
+        now = utc_now()
+        if isinstance(current_meta, dict) and _account_can_serve_family(
+            paths, previous, current_meta, family, policy, now
+        ):
+            return RouteResult(family, family, previous, previous, None, strategy, "active_ready")
+
+        same_family_account = _best_switch_candidate(
+            paths, state, exclude=previous, required_family=family
+        )
+        alternate_current = (
+            previous
+            if isinstance(current_meta, dict)
+            and strategy != "strict-family"
+            and _account_can_serve_family(paths, previous, current_meta, alternate, policy, now)
+            else None
+        )
+        alternate_account = (
+            _best_switch_candidate(paths, state, exclude=previous, required_family=alternate)
+            if strategy != "strict-family"
+            else None
+        )
+
+        if strategy == "same-account-first":
+            choices = ((alternate_current, alternate), (same_family_account, family), (alternate_account, alternate))
+        elif strategy == "strict-family":
+            choices = ((same_family_account, family),)
+        else:
+            choices = ((same_family_account, family), (alternate_current, alternate), (alternate_account, alternate))
+
+        selected_account = None
+        selected_family = None
+        for account_name, candidate_family in choices:
+            if account_name:
+                selected_account = account_name
+                selected_family = candidate_family
+                break
+        if selected_account is None or selected_family is None:
+            return RouteResult(family, None, previous, previous, None, strategy, "no_route")
+
+        if selected_account == previous:
+            return RouteResult(family, selected_family, previous, previous, None, strategy, "family_fallback")
+        if get_switch_mode(state) != "auto" and not force_switch:
+            return RouteResult(family, selected_family, previous, previous, None, strategy, "switch_required", selected_account)
+
+        _copy_active_runtime(paths, selected_account)
+        state["active"] = selected_account
+        state = sync_state_from_disk(paths, state)
+        _sync_runtime_to_live_dir(paths, state)
+        save_state(paths, state)
+        outcome = "account_switch" if selected_family == family else "account_and_family_fallback"
+        return RouteResult(family, selected_family, previous, selected_account, selected_account, strategy, outcome)
 
 
 def pick_due_refresh_account(paths: ManagerPaths) -> str | None:
@@ -1072,7 +1328,13 @@ def pick_due_refresh_account(paths: ManagerPaths) -> str | None:
     return None
 
 
-def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> EnsureActiveResult:
+def ensure_active_account(
+    paths: ManagerPaths,
+    *,
+    force: bool = False,
+    required_family: str | None = None,
+) -> EnsureActiveResult:
+    family = _normalize_usage_family(required_family, allow_none=True)
     snapshot = get_status_snapshot(paths)
     switch_mode = snapshot.get("switch_mode", DEFAULT_SWITCH_MODE)
     switch_policy = snapshot.get("switch_policy") or _default_switch_policy()
@@ -1089,12 +1351,13 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
             switched_to=None,
             reason=None,
             cooldown_minutes=0,
+            required_family=family,
         )
 
     if not active_name:
         with manager_lock(paths):
             state = sync_state_from_disk(paths, load_state(paths))
-            switched_to = _best_switch_candidate(paths, state)
+            switched_to = _best_switch_candidate(paths, state, required_family=family)
             if switched_to:
                 _copy_active_runtime(paths, switched_to)
                 state["active"] = switched_to
@@ -1110,6 +1373,7 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
                 switched_to=None,
                 reason="no_active_account",
                 cooldown_minutes=0,
+                required_family=family,
             )
         return EnsureActiveResult(
             triggered=True,
@@ -1119,13 +1383,14 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
             switched_to=switched_to,
             reason="no_active_account",
             cooldown_minutes=0,
+            required_family=family,
         )
 
     active_meta = accounts.get(active_name)
     if not isinstance(active_meta, dict):
         with manager_lock(paths):
             state = sync_state_from_disk(paths, load_state(paths))
-            switched_to = _best_switch_candidate(paths, state, exclude=active_name)
+            switched_to = _best_switch_candidate(paths, state, exclude=active_name, required_family=family)
             if switched_to:
                 _copy_active_runtime(paths, switched_to)
                 state["active"] = switched_to
@@ -1141,6 +1406,7 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
                 switched_to=None,
                 reason="active_missing",
                 cooldown_minutes=0,
+                required_family=family,
             )
         return EnsureActiveResult(
             triggered=True,
@@ -1150,6 +1416,7 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
             switched_to=switched_to,
             reason="active_missing",
             cooldown_minutes=0,
+            required_family=family,
         )
 
     reason = None
@@ -1158,13 +1425,29 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
     if health in {"auth_missing", "auth_expired"}:
         reason = health
         cooldown_minutes = 60
-    elif _is_short_window_exhausted(
+    elif _is_family_quota_exhausted(
         active_meta,
         now,
-        threshold_percent=float(switch_policy.get("short_usage_threshold_percent", DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT)),
+        threshold_percent=float(
+            switch_policy["family_thresholds"].get(
+                family or "gemini",
+                switch_policy.get("short_usage_threshold_percent", DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT),
+            )
+        ),
+        family=family or "gemini",
     ):
-        reason = "quota_exhausted"
-        cooldown_minutes = _cooldown_minutes_from_short_window(active_meta, now)
+        reason = f"{family}_quota_exhausted" if family else "quota_exhausted"
+        cooldown_minutes = _cooldown_minutes_from_family_quota(
+            active_meta,
+            now,
+            threshold_percent=float(
+                switch_policy["family_thresholds"].get(
+                    family or "gemini",
+                    switch_policy.get("short_usage_threshold_percent", DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT),
+                )
+            ),
+            family=family or "gemini",
+        )
     elif _refresh_failure_threshold_reached(
         active_meta,
         threshold=int(switch_policy.get("refresh_failure_threshold", DEFAULT_REFRESH_FAILURE_SWITCH_THRESHOLD)),
@@ -1181,6 +1464,7 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
             switched_to=None,
             reason=None,
             cooldown_minutes=0,
+            required_family=family,
         )
 
     result = rotate_after_failure(
@@ -1188,6 +1472,7 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
         reason=reason,
         cooldown_minutes=cooldown_minutes,
         force_switch=True,
+        required_family=family,
     )
     return EnsureActiveResult(
         triggered=bool(result.switched_to or result.previous_active),
@@ -1197,6 +1482,7 @@ def ensure_active_account(paths: ManagerPaths, *, force: bool = False) -> Ensure
         switched_to=result.switched_to,
         reason=reason,
         cooldown_minutes=cooldown_minutes,
+        required_family=family,
     )
 
 
@@ -1981,6 +2267,7 @@ def save_account_profile(paths: ManagerPaths, name: str, source_dir: Path, overw
             "fail_count": 0 if overwrite else previous_meta.get("fail_count", 0),
             "refresh_fail_count": 0 if overwrite else previous_meta.get("refresh_fail_count", 0),
             "created_at": previous_meta.get("created_at") or utc_now().isoformat(),
+            "usage_families": _normalize_usage_families(previous_meta),
             "usage_windows": _normalize_usage_windows(previous_meta),
             "usage_status": previous_meta.get("usage_status", "unknown"),
             "usage_value": previous_meta.get("usage_value"),
@@ -1992,6 +2279,9 @@ def save_account_profile(paths: ManagerPaths, name: str, source_dir: Path, overw
             "refresh_policy_seconds": int(previous_meta.get("refresh_policy_seconds", DEFAULT_REFRESH_POLICY_SECONDS) or DEFAULT_REFRESH_POLICY_SECONDS),
             "identity": identity,
             "proxy": _normalize_proxy_config(previous_meta.get("proxy")),
+            "family_cooldowns": dict(previous_meta.get("family_cooldowns", {}))
+            if isinstance(previous_meta.get("family_cooldowns"), dict)
+            else {},
         }
         _sync_legacy_usage_fields(state["accounts"][name])
         if overwrite and state.get("active") == name:
@@ -2095,6 +2385,7 @@ def get_status_snapshot(paths: ManagerPaths) -> dict:
             "fail_count": int(meta.get("fail_count", 0) or 0),
             "refresh_fail_count": int(meta.get("refresh_fail_count", 0) or 0),
             "created_at": meta.get("created_at"),
+            "usage_families": _normalize_usage_families(meta),
             "usage_windows": _normalize_usage_windows(meta),
             "usage_status": meta.get("usage_status", "unknown"),
             "usage_value": meta.get("usage_value"),
@@ -2107,6 +2398,9 @@ def get_status_snapshot(paths: ManagerPaths) -> dict:
             "refresh_policy_seconds": int(meta.get("refresh_policy_seconds", DEFAULT_REFRESH_POLICY_SECONDS) or DEFAULT_REFRESH_POLICY_SECONDS),
             "identity": meta.get("identity") if isinstance(meta.get("identity"), dict) else None,
             "proxy": _normalize_proxy_config(meta.get("proxy")),
+            "family_cooldowns": dict(meta.get("family_cooldowns", {}))
+            if isinstance(meta.get("family_cooldowns"), dict)
+            else {},
         }
     active_name = state.get("active")
     active_meta = state["accounts"].get(active_name) if active_name else None
@@ -2210,8 +2504,11 @@ def update_switch_policy(
     paths: ManagerPaths,
     *,
     short_usage_threshold_percent: float | None = None,
+    gemini_usage_threshold_percent: float | None = None,
+    other_usage_threshold_percent: float | None = None,
     refresh_failure_threshold: int | None = None,
     candidate_strategy: str | None = None,
+    family_fallback_strategy: str | None = None,
 ) -> dict:
     with manager_lock(paths):
         state = sync_state_from_disk(paths, load_state(paths))
@@ -2221,6 +2518,17 @@ def update_switch_policy(
             if value < 0.0 or value > 100.0:
                 raise ValueError("short_usage_threshold_percent must be between 0 and 100.")
             policy["short_usage_threshold_percent"] = value
+            policy["family_thresholds"] = {family: value for family in USAGE_FAMILY_NAMES}
+        for family, requested_value in (
+            ("gemini", gemini_usage_threshold_percent),
+            ("other", other_usage_threshold_percent),
+        ):
+            if requested_value is None:
+                continue
+            value = float(requested_value)
+            if value < 0.0 or value > 100.0:
+                raise ValueError(f"{family}_usage_threshold_percent must be between 0 and 100.")
+            policy["family_thresholds"][family] = value
         if refresh_failure_threshold is not None:
             value = int(refresh_failure_threshold)
             if value < 1:
@@ -2231,6 +2539,11 @@ def update_switch_policy(
             if normalized_strategy != candidate_strategy.strip().lower():
                 raise ValueError(f"Unsupported candidate strategy: {candidate_strategy}")
             policy["candidate_strategy"] = normalized_strategy
+        if family_fallback_strategy is not None:
+            normalized_fallback = _normalize_family_fallback_strategy(family_fallback_strategy)
+            if normalized_fallback != family_fallback_strategy.strip().lower():
+                raise ValueError(f"Unsupported family fallback strategy: {family_fallback_strategy}")
+            policy["family_fallback_strategy"] = normalized_fallback
         state["switch_policy"] = policy
         save_state(paths, state)
         return dict(policy)
@@ -2374,6 +2687,7 @@ def rotate_after_failure(
     dedupe_seconds: int = DEFAULT_SWITCH_DEDUPE_SECONDS,
     trigger: str = "unknown",
     request_id: str | None = None,
+    required_family: str | None = None,
 ) -> RotationResult:
     if cooldown_minutes < 0:
         raise ValueError("Cooldown minutes must be non-negative.")
@@ -2388,6 +2702,7 @@ def rotate_after_failure(
             dedupe_seconds=dedupe_seconds,
             trigger=trigger,
             request_id=request_id,
+            required_family=required_family,
         )
 
 
@@ -2400,10 +2715,12 @@ def rotate_after_failure_locked(
     dedupe_seconds: int = DEFAULT_SWITCH_DEDUPE_SECONDS,
     trigger: str = "unknown",
     request_id: str | None = None,
+    required_family: str | None = None,
 ) -> RotationResult:
     if cooldown_minutes < 0:
         raise ValueError("Cooldown minutes must be non-negative.")
 
+    family = _normalize_usage_family(required_family, allow_none=True)
     state = sync_state_from_disk(paths, load_state(paths))
     if live_dir is not None:
         state["live_dir"] = str(live_dir.resolve())
@@ -2417,6 +2734,7 @@ def rotate_after_failure_locked(
         dedupe_seconds > 0
         and runtime.get("status") == "ready"
         and runtime.get("reason") == reason
+        and runtime.get("required_family") == family
         and last_completed_at is not None
         and (now - last_completed_at).total_seconds() <= dedupe_seconds
         and state.get("active")
@@ -2427,6 +2745,7 @@ def rotate_after_failure_locked(
             reason=reason,
             trigger=trigger,
             request_id=request_id,
+            required_family=family,
             active=state.get("active"),
             previous_active=runtime.get("previous_active"),
             started_at=runtime.get("last_started_at"),
@@ -2442,6 +2761,7 @@ def rotate_after_failure_locked(
             switched_to=None,
             outcome="already_switched",
             cooldown_minutes=0,
+            required_family=family,
             at=runtime.get("last_completed_at"),
         )
         save_state(paths, state)
@@ -2462,6 +2782,7 @@ def rotate_after_failure_locked(
         reason=reason,
         trigger=trigger,
         request_id=request_id,
+        required_family=family,
         active=previous,
         previous_active=previous,
         started_at=now_iso,
@@ -2475,6 +2796,7 @@ def rotate_after_failure_locked(
             reason=reason,
             trigger=trigger,
             request_id=request_id,
+            required_family=family,
             active=None,
             previous_active=None,
             completed_at=utc_now().isoformat(),
@@ -2489,6 +2811,7 @@ def rotate_after_failure_locked(
             switched_to=None,
             outcome="no_active",
             cooldown_minutes=cooldown_minutes,
+            required_family=family,
         )
         save_state(paths, state)
         return RotationResult(
@@ -2510,6 +2833,7 @@ def rotate_after_failure_locked(
             reason=reason,
             trigger=trigger,
             request_id=request_id,
+            required_family=family,
             active=None,
             previous_active=previous,
             completed_at=utc_now().isoformat(),
@@ -2524,6 +2848,7 @@ def rotate_after_failure_locked(
             switched_to=None,
             outcome="active_missing",
             cooldown_minutes=cooldown_minutes,
+            required_family=family,
         )
         save_state(paths, state)
         return RotationResult(
@@ -2538,7 +2863,18 @@ def rotate_after_failure_locked(
 
     meta["last_error"] = reason
     meta["fail_count"] = int(meta.get("fail_count", 0)) + 1
-    if cooldown_minutes > 0:
+    if family is not None:
+        family_cooldowns = meta.get("family_cooldowns")
+        if not isinstance(family_cooldowns, dict):
+            family_cooldowns = {}
+        family_cooldowns[family] = (
+            (utc_now() + timedelta(minutes=cooldown_minutes)).isoformat()
+            if cooldown_minutes > 0
+            else None
+        )
+        meta["family_cooldowns"] = family_cooldowns
+        meta["cooldown_until"] = None
+    elif cooldown_minutes > 0:
         meta["cooldown_until"] = (utc_now() + timedelta(minutes=cooldown_minutes)).isoformat()
     else:
         meta["cooldown_until"] = None
@@ -2547,7 +2883,7 @@ def rotate_after_failure_locked(
 
     switched_to = None
     if force_switch or switch_mode == "auto":
-        switched_to = _best_switch_candidate(paths, state, exclude=previous)
+        switched_to = _best_switch_candidate(paths, state, exclude=previous, required_family=family)
         if switched_to:
             _copy_active_runtime(paths, switched_to)
             state["active"] = switched_to
@@ -2560,6 +2896,7 @@ def rotate_after_failure_locked(
         reason=reason,
         trigger=trigger,
         request_id=request_id,
+        required_family=family,
         active=state.get("active"),
         previous_active=previous,
         completed_at=utc_now().isoformat(),
@@ -2574,6 +2911,7 @@ def rotate_after_failure_locked(
         switched_to=switched_to,
         outcome="switched" if switched_to else "no_candidate",
         cooldown_minutes=cooldown_minutes,
+        required_family=family,
     )
     save_state(paths, state)
     return RotationResult(

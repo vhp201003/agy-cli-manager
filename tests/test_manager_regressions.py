@@ -225,3 +225,136 @@ class ManagerRegressionTests(unittest.TestCase):
         m._sync_legacy_usage_fields(meta)
         self.assertEqual(meta["usage_families"]["gemini"], meta["usage_windows"])
         self.assertEqual(meta["usage_families"]["other"]["short"]["status"], "unknown")
+
+    def test_family_aware_failover_uses_requested_family_quota(self) -> None:
+        self.add("a")
+        self.add("b")
+        state = m.load_state(self.paths)
+        for name, gemini_value, other_value in (
+            ("a", 90.0, 0.0),
+            ("b", 0.0, 80.0),
+        ):
+            state["accounts"][name]["usage_families"] = {
+                "gemini": {
+                    "short": {"status": "known", "value": gemini_value, "reset_at": "2099-01-01T00:00:00+00:00"},
+                    "weekly": {"status": "known", "value": 90.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                },
+                "other": {
+                    "short": {"status": "known", "value": other_value, "reset_at": "2099-01-01T00:00:00+00:00"},
+                    "weekly": {"status": "known", "value": 90.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                },
+            }
+            m._sync_legacy_usage_fields(state["accounts"][name])
+        m.save_state(self.paths, state)
+        m.switch_account(self.paths, "a")
+
+        result = m.ensure_active_account(self.paths, required_family="other")
+
+        self.assertTrue(result.triggered)
+        self.assertEqual(result.reason, "other_quota_exhausted")
+        self.assertEqual(result.switched_to, "b")
+        updated = m.load_state(self.paths)
+        self.assertEqual(updated["active"], "b")
+        self.assertIsNone(updated["accounts"]["a"].get("cooldown_until"))
+        self.assertIsNotNone(updated["accounts"]["a"]["family_cooldowns"]["other"])
+
+    def test_family_aware_failover_does_not_select_depleted_candidate(self) -> None:
+        self.add("a")
+        self.add("b")
+        state = m.load_state(self.paths)
+        for name in ("a", "b"):
+            state["accounts"][name]["usage_families"] = {
+                family: {
+                    "short": {"status": "known", "value": 0.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                    "weekly": {"status": "known", "value": 50.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                }
+                for family in ("gemini", "other")
+            }
+            m._sync_legacy_usage_fields(state["accounts"][name])
+        m.save_state(self.paths, state)
+        m.switch_account(self.paths, "a")
+
+        result = m.ensure_active_account(self.paths, required_family="gemini")
+
+        self.assertIsNone(result.switched_to)
+        self.assertIsNone(m.load_state(self.paths)["active"])
+
+    def test_switch_policy_supports_per_family_thresholds(self) -> None:
+        policy = m.update_switch_policy(
+            self.paths,
+            gemini_usage_threshold_percent=15.0,
+            other_usage_threshold_percent=5.0,
+        )
+        self.assertEqual(policy["family_thresholds"], {"gemini": 15.0, "other": 5.0})
+
+    def test_route_defaults_to_same_family_on_another_account(self) -> None:
+        self.add("a")
+        self.add("b")
+        state = m.load_state(self.paths)
+        for name, gemini_value in (("a", 0.0), ("b", 80.0)):
+            state["accounts"][name]["usage_families"] = {
+                "gemini": {
+                    "short": {"status": "known", "value": gemini_value, "reset_at": "2099-01-01T00:00:00+00:00"},
+                    "weekly": {"status": "known", "value": 80.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                },
+                "other": {
+                    "short": {"status": "known", "value": 90.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                    "weekly": {"status": "known", "value": 90.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                },
+            }
+            m._sync_legacy_usage_fields(state["accounts"][name])
+        m.save_state(self.paths, state)
+        m.switch_account(self.paths, "a")
+
+        result = m.resolve_route(self.paths, "gemini")
+
+        self.assertEqual(result.outcome, "account_switch")
+        self.assertEqual(result.selected_family, "gemini")
+        self.assertEqual(result.active, "b")
+
+    def test_route_can_prefer_other_family_on_same_account(self) -> None:
+        self.add("a")
+        self.add("b")
+        state = m.load_state(self.paths)
+        for name, gemini_value in (("a", 0.0), ("b", 80.0)):
+            state["accounts"][name]["usage_families"] = {
+                "gemini": {
+                    "short": {"status": "known", "value": gemini_value, "reset_at": "2099-01-01T00:00:00+00:00"},
+                    "weekly": {"status": "known", "value": 80.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                },
+                "other": {
+                    "short": {"status": "known", "value": 90.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                    "weekly": {"status": "known", "value": 90.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                },
+            }
+            m._sync_legacy_usage_fields(state["accounts"][name])
+        m.save_state(self.paths, state)
+        m.switch_account(self.paths, "a")
+
+        result = m.resolve_route(self.paths, "gemini", fallback_strategy="same-account-first")
+
+        self.assertEqual(result.outcome, "family_fallback")
+        self.assertEqual(result.selected_family, "other")
+        self.assertEqual(result.active, "a")
+        self.assertIsNone(result.switched_to)
+
+    def test_weekly_exhaustion_triggers_family_failover(self) -> None:
+        self.add("a")
+        self.add("b")
+        state = m.load_state(self.paths)
+        for name, weekly_value in (("a", 0.0), ("b", 75.0)):
+            state["accounts"][name]["usage_families"] = {
+                "gemini": {
+                    "short": {"status": "known", "value": 100.0, "reset_at": "2099-01-01T00:00:00+00:00"},
+                    "weekly": {"status": "known", "value": weekly_value, "reset_at": "2099-01-02T00:00:00+00:00"},
+                },
+                "other": m._default_usage_windows(),
+            }
+            m._sync_legacy_usage_fields(state["accounts"][name])
+        m.save_state(self.paths, state)
+        m.switch_account(self.paths, "a")
+
+        result = m.ensure_active_account(self.paths, required_family="gemini")
+
+        self.assertEqual(result.reason, "gemini_quota_exhausted")
+        self.assertEqual(result.switched_to, "b")

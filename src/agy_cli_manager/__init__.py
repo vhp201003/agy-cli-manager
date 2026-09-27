@@ -3,6 +3,7 @@
 from agy_cli_manager.manager import (
     ManagerPaths,
     RotationResult,
+    RouteResult,
     apply_active,
     build_paths,
     default_root,
@@ -16,6 +17,7 @@ from agy_cli_manager.manager import (
     refresh_account_usage,
     refresh_due_account,
     rotate_after_failure,
+    resolve_route,
     get_account_proxy,
     set_live_dir,
     set_account_proxy,
@@ -37,6 +39,7 @@ from agy_cli_manager.watch import (
 __all__ = [
     "ManagerPaths",
     "RotationResult",
+    "RouteResult",
     "apply_active",
     "build_paths",
     "default_root",
@@ -50,6 +53,7 @@ __all__ = [
     "refresh_account_usage",
     "refresh_due_account",
     "rotate_after_failure",
+    "resolve_route",
     "get_account_proxy",
     "set_live_dir",
     "set_account_proxy",

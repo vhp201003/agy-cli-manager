@@ -4,6 +4,12 @@
 
 - parse and persist separate Gemini and Claude/GPT-OSS quota families
 - show five-hour and weekly quota for both model families in the TUI
+- add family-aware failover selection with `--family gemini|other`
+- treat either five-hour or weekly exhaustion as blocking for the requested family
+- support independent Gemini and Other-family failover thresholds
+- keep quota cooldowns scoped to the depleted family instead of disabling the whole account
+- expose persisted model-family usage in status snapshots used by the TUI and JSON API
+- add `resolve-route` for configurable account-first, family-first, or strict-family routing decisions
 
 ## v0.2.2 - 2026-09-21
 
