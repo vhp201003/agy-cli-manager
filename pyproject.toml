@@ -13,6 +13,14 @@ authors = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+proxy = [
+  "cryptography",
+  "fastapi",
+  "uvicorn",
+  "sse-starlette",
+]
+
 [project.scripts]
 agy-cli-manager = "agy_cli_manager.cli:main"
 

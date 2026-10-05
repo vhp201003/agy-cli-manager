@@ -6,3 +6,7 @@ build/
 *.egg-info/
 .DS_Store
 AGENTS.md
+certs/
+*.key
+*.crt
+

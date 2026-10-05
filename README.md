@@ -134,9 +134,34 @@ agy-cli-manager list
 agy-cli-manager
 ```
 
-With no subcommand, the full-screen dashboard opens by default.
+### 5. Multi-Account Live Proxy & Web Dashboard
 
-### 5. Auto-switch when quota is full
+Run the built-in HTTP/HTTPS reverse proxy with token pooling, auto-routing on 429, and live telemetry web dashboard:
+
+```bash
+# Install proxy dependencies
+pip install ".[proxy]"
+
+# Start proxy & web dashboard (http://127.0.0.1:8800)
+agy-cli-manager proxy
+```
+
+Then in your working terminal:
+```powershell
+$env:HTTPS_PROXY   = "http://127.0.0.1:8899"
+$env:HTTP_PROXY    = "http://127.0.0.1:8899"
+$env:SSL_CERT_FILE = "$HOME\.agy-cli-manager\certs\bundle.crt"
+agy
+```
+
+Features included:
+- **Round-robin request routing** across discovered Windows Credential Manager accounts (`gemini:antigravity:acc*`)
+- **Instant 429 failover** with exponential backoff & cooldown tracking
+- **Live SSE Telemetry Dashboard** with payload inspection & JSON color tokenizing
+- **1-Click 5H Window Quota Trigger**: starts the 5h window proactively for all accounts using minimal token cost (`daily-cloudcode-pa.googleapis.com`)
+- **Auto-refreshed OAuth tokens** in the background
+
+### 6. Auto-switch when quota is full
 
 When `agy` hits **Individual quota reached**, the manager switches to the next account. Restart `agy` after that. The old process may keep writing quota errors; those lines do not rotate again until you acknowledge the restart or a new session log appears.
 

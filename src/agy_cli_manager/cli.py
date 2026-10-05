@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import curses
+try:
+    import curses
+except ImportError:
+    curses = None
 import json
 import textwrap
 import sys
@@ -216,6 +219,13 @@ def build_parser() -> argparse.ArgumentParser:
     update_meta.add_argument("--next-live-check-at")
     update_meta.add_argument("--refresh-policy-seconds", type=int)
     update_meta.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    proxy_cmd = sub.add_parser("proxy", help="Run multi-account live HTTP/HTTPS proxy & telemetry dashboard")
+    proxy_cmd.add_argument("--proxy-host", default="127.0.0.1", help="Proxy listen host (default: 127.0.0.1)")
+    proxy_cmd.add_argument("--proxy-port", type=int, default=8899, help="Proxy listen port (default: 8899)")
+    proxy_cmd.add_argument("--dashboard-host", default="127.0.0.1", help="Dashboard listen host (default: 127.0.0.1)")
+    proxy_cmd.add_argument("--dashboard-port", type=int, default=8800, help="Dashboard listen port (default: 8800)")
+    proxy_cmd.add_argument("--no-browser", action="store_true", help="Do not open dashboard in web browser automatically")
     return parser
 
 
@@ -2320,6 +2330,16 @@ def main() -> int:
                 print(json.dumps(meta, indent=2, sort_keys=True))
             else:
                 print(f"updated-meta: {args.name}")
+            return 0
+        if args.command == "proxy":
+            from agy_cli_manager.proxy.launcher import run_proxy_service
+            run_proxy_service(
+                proxy_host=args.proxy_host,
+                proxy_port=args.proxy_port,
+                dashboard_host=args.dashboard_host,
+                dashboard_port=args.dashboard_port,
+                open_browser=not args.no_browser,
+            )
             return 0
     except ValueError as e:
         parser.exit(2, f"error: {e}\n")
