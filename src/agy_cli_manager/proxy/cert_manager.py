@@ -9,7 +9,16 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-CERTS_DIR = Path(__file__).parent / "certs"
+# Fallback hierarchy: <repo_root>/certs -> ~/.agy-cli-manager/certs -> <module_dir>/certs
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_USER_ROOT = Path.home() / ".agy-cli-manager"
+
+if (_REPO_ROOT / "certs").is_dir() or (_REPO_ROOT / "pyproject.toml").is_file():
+    CERTS_DIR = _REPO_ROOT / "certs"
+elif _USER_ROOT.is_dir():
+    CERTS_DIR = _USER_ROOT / "certs"
+else:
+    CERTS_DIR = Path(__file__).parent / "certs"
 
 
 class CertManager:
