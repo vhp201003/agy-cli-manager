@@ -177,6 +177,9 @@ class CertManager:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         return "True" in res.stdout
 
+    def install_ca_to_windows_store(self) -> bool:
+        return self.install_ca_windows()
+
     def is_ca_installed_windows(self) -> bool:
         cmd = [
             "powershell",

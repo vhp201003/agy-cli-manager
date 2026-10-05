@@ -25,7 +25,7 @@ def run_proxy_service(
 ) -> None:
     cm = CertManager()
     bundle_path = cm.get_ca_bundle_path()
-    cm.install_ca_to_windows_store()
+    cm.install_ca_windows()
 
     tm = TokenManager()
     accounts = tm.list_accounts()
