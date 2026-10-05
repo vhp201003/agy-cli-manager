@@ -28,7 +28,8 @@ def run_proxy_service(
     cm.install_ca_windows()
 
     tm = TokenManager()
-    accounts = tm.list_accounts()
+    tm.reload_accounts()
+    accounts = list(tm._accounts.keys())
 
     print("=" * 68)
     print("      [AGY-CLI-MANAGER] MULTI-ACCOUNT ROUTER & FASTAPI TELEMETRY")
