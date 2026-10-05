@@ -680,8 +680,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       let gemTotal = 0, claudeTotal = 0, count = 0;
       accs.forEach(a => {
         const q = a.quota || {};
-        if (q.gemini && q.gemini['5h']) gemTotal += q.gemini['5h'].percent;
-        if (q.third_party && q.third_party['5h']) claudeTotal += q.third_party['5h'].percent;
+        if (q.gemini && q.gemini['5h'] && q.gemini['weekly'])
+          gemTotal += Math.min(q.gemini['5h'].percent, q.gemini['weekly'].percent);
+        else if (q.gemini && q.gemini['5h']) gemTotal += q.gemini['5h'].percent;
+        if (q.third_party && q.third_party['5h'] && q.third_party['weekly'])
+          claudeTotal += Math.min(q.third_party['5h'].percent, q.third_party['weekly'].percent);
+        else if (q.third_party && q.third_party['5h']) claudeTotal += q.third_party['5h'].percent;
         count++;
       });
       if (count > 0) {
@@ -703,6 +707,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         const gWeekly = (q.gemini && q.gemini['weekly']) || { percent: 100, reset_time: null };
         const c5h = (q.third_party && q.third_party['5h']) || { percent: 100, reset_time: null };
         const cWeekly = (q.third_party && q.third_party['weekly']) || { percent: 100, reset_time: null };
+        const c5hEffective = { ...c5h, percent: Math.min(c5h.percent, cWeekly.percent) };
+        const g5hEffective = { ...g5h, percent: Math.min(g5h.percent, gWeekly.percent) };
 
         const emailDisplay = acc.email && acc.email.includes('@') ? acc.email : (acc.email || name);
         const nameDisplay = acc.display_name && acc.display_name !== name ? acc.display_name : '';
@@ -732,10 +738,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <div class="quota-row">
               <div class="quota-row-header">
                 <span>5-Hour Limit:</span>
-                <b>${g5h.percent}%</b>
+                <b>${g5hEffective.percent}%</b>
               </div>
               <div class="bar-bg">
-                <div class="bar-fill" style="width: ${g5h.percent}%; background: ${getBarColor(g5h.percent, 'var(--accent)')}"></div>
+                <div class="bar-fill" style="width: ${g5hEffective.percent}%; background: ${getBarColor(g5hEffective.percent, 'var(--accent)')}"></div>
               </div>
               <div class="reset-label">${formatTimeUntil(g5h.reset_time)}</div>
             </div>
@@ -760,10 +766,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <div class="quota-row">
               <div class="quota-row-header">
                 <span>5-Hour Limit:</span>
-                <b>${c5h.percent}%</b>
+                <b>${c5hEffective.percent}%</b>
               </div>
               <div class="bar-bg">
-                <div class="bar-fill" style="width: ${c5h.percent}%; background: ${getBarColor(c5h.percent, 'var(--purple)')}"></div>
+                <div class="bar-fill" style="width: ${c5hEffective.percent}%; background: ${getBarColor(c5hEffective.percent, 'var(--purple)')}"></div>
               </div>
               <div class="reset-label">${formatTimeUntil(c5h.reset_time)}</div>
             </div>
