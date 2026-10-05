@@ -19,6 +19,7 @@ proxy = [
   "fastapi",
   "uvicorn",
   "sse-starlette",
+  "certifi",
 ]
 
 [project.scripts]

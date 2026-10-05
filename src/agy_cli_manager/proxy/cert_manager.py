@@ -149,9 +149,21 @@ class CertManager:
 
     def get_ca_bundle_path(self) -> Path:
         bundle_path = self.certs_dir / "bundle.crt"
-        import certifi
-        base_cacert = Path(certifi.where()).read_bytes()
-        ca_pem = self.ca_crt_path.read_bytes()
+        if bundle_path.is_file() and bundle_path.stat().st_size > 0:
+            return bundle_path
+
+        try:
+            import certifi
+            base_cacert = Path(certifi.where()).read_bytes()
+        except ImportError:
+            import ssl
+            paths = ssl.get_default_verify_paths()
+            if paths.cafile and Path(paths.cafile).is_file():
+                base_cacert = Path(paths.cafile).read_bytes()
+            else:
+                base_cacert = b""
+
+        ca_pem = self.ca_crt_path.read_bytes() if self.ca_crt_path.is_file() else b""
         bundle_path.write_bytes(base_cacert + b"\n" + ca_pem)
         return bundle_path
 
