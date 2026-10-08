@@ -44,7 +44,7 @@ logging.basicConfig(
 logger = logging.getLogger("AgyProxy")
 
 # Global event bus for FastAPI telemetry
-MAX_LOG_HISTORY = 150
+MAX_LOG_HISTORY = 300
 REQUEST_LOGS: deque[dict] = deque(maxlen=MAX_LOG_HISTORY)
 EVENT_LISTENERS: list[callable] = []
 LOG_LOCK = threading.Lock()
@@ -60,6 +60,32 @@ def unregister_event_listener(listener: callable) -> None:
     with LOG_LOCK:
         if listener in EVENT_LISTENERS:
             EVENT_LISTENERS.remove(listener)
+
+
+def _extract_model_from_request(path: str, body_str: str) -> str:
+    # 1. Search in body if json
+    if body_str and "model" in body_str:
+        try:
+            m = re.search(r'"model"\s*:\s*"([^"]+)"', body_str)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    # 2. Search in URL path
+    if "models/" in path:
+        m = re.search(r"models/([^:]+)", path)
+        if m:
+            return m.group(1)
+    # 3. Known endpoint heuristics
+    if "generateContent" in path or "streamGenerateContent" in path:
+        return "Gemini API"
+    if "loadCodeAssist" in path:
+        return "CodeAssist Auth"
+    if "retrieveUserQuotaSummary" in path:
+        return "Quota Telemetry"
+    if "listExperiments" in path:
+        return "Experiments"
+    return "API Request"
 
 
 def broadcast_event(event: dict) -> None:
@@ -119,6 +145,56 @@ def _format_body_for_log(body: bytes, headers: dict[str, str] | None = None, max
         pass
 
     return f"<binary data: {len(data)} bytes>"
+
+
+def _extract_session_key(path: str, headers: dict[str, str], body_str: str, raw_body: bytes | None = None) -> str | None:
+    for h in ("x-session-id", "x-conversation-id", "session-id", "conversation-id"):
+        if h in headers:
+            return headers[h]
+
+    # 1. Fast regex extraction directly on raw bytes / body_str (guaranteed to match even if JSON is truncated)
+    search_text = body_str or ""
+    if raw_body:
+        try:
+            # Check first 2048 bytes where requestId always lives
+            search_text = raw_body[:2048].decode("utf-8", "ignore")
+        except Exception:
+            pass
+
+    if search_text:
+        # Match "requestId": "agent/<agent_id>..." or "chat/<chat_id>..."
+        m = re.search(r'["\']requestId["\']\s*:\s*["\'](agent|chat)/([^/\\"\s]+)', search_text)
+        if m:
+            return f"{m.group(1)}:{m.group(2)}"
+
+        # Match sessionId / conversationId in JSON
+        m_sess = re.search(r'["\'](sessionId|conversationId|session_id|conversation_id)["\']\s*:\s*["\']?([^"\'\s,{}]+)', search_text)
+        if m_sess:
+            return m_sess.group(2)
+
+    # 2. Complete JSON parse fallback if regex didn't catch and complete payload is available
+    if body_str and body_str.startswith("{"):
+        try:
+            data = json.loads(body_str)
+
+            inner_req = data.get("request")
+            if isinstance(inner_req, dict):
+                for k in ("sessionId", "conversationId", "session_id", "conversation_id", "chatId", "taskId", "task_id"):
+                    if k in inner_req and inner_req[k]:
+                        return str(inner_req[k])
+
+            for k in ("sessionId", "conversationId", "session_id", "conversation_id", "chatId", "taskId", "task_id"):
+                if k in data and data[k]:
+                    return str(data[k])
+
+            meta = data.get("metadata")
+            if isinstance(meta, dict):
+                for k in ("conversationId", "sessionId", "taskId"):
+                    if k in meta and meta[k]:
+                        return str(meta[k])
+        except Exception:
+            pass
+    return None
 
 
 class MITMProxyHandler(socketserver.BaseRequestHandler):
@@ -310,9 +386,11 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
 
         body_str = _format_body_for_log(body, headers)
         body_size = len(body) if body else 0
+        model_name = _extract_model_from_request(path, body_str)
+        session_key = _extract_session_key(path, headers, body_str, raw_body=body)
 
         for attempt in range(max_attempts):
-            acc_name, access_token = self.token_manager.get_token_for_request()
+            acc_name, access_token = self.token_manager.get_token_by_session(session_key, model_name=model_name)
             out_headers = dict(headers)
             out_headers["host"] = host
             out_headers["authorization"] = f"Bearer {access_token}"
@@ -427,15 +505,29 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
                 client_sock.sendall(b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
 
                 total_streamed = 0
+                resp_chunks: list[bytes] = []
+                resp_sample_size = 0
                 while True:
                     chunk = resp.read(4096)
                     if not chunk:
                         break
                     total_streamed += len(chunk)
+                    if resp_sample_size < 16384:
+                        resp_chunks.append(chunk)
+                        resp_sample_size += len(chunk)
                     client_sock.sendall(f"{len(chunk):X}\r\n".encode("latin1") + chunk + b"\r\n")
                 client_sock.sendall(b"0\r\n\r\n")
 
                 conn.close()
+
+                # Format response sample preview
+                resp_preview = ""
+                if resp_chunks:
+                    try:
+                        raw_combined = b"".join(resp_chunks)
+                        resp_preview = _format_body_for_log(raw_combined, dict(resp.getheaders()))
+                    except Exception:
+                        resp_preview = f"<streamed response: {total_streamed} bytes>"
 
                 # Broadcast successful completion to dashboard
                 broadcast_event({
@@ -445,6 +537,7 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
                     "path": path,
                     "host": host,
                     "account": acc_name,
+                    "model": model_name,
                     "inbound_token": inbound_preview,
                     "overridden_token": overridden_preview,
                     "status": resp.status,
@@ -452,6 +545,8 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
                     "latency_ms": latency_ms,
                     "body": body_str,
                     "body_size": body_size,
+                    "response_preview": resp_preview,
+                    "response_size": total_streamed,
                     "retried": attempt > 0,
                 })
 
@@ -512,16 +607,19 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
 
 
-def start_proxy_server(port: int = 8899) -> tuple[ThreadedTCPServer, threading.Thread]:
-    cm = CertManager()
-    tm = TokenManager()
+def start_proxy_server(port: int = 8899, token_manager: TokenManager | None = None, cert_manager: CertManager | None = None) -> tuple[ThreadedTCPServer, threading.Thread]:
+    cm = cert_manager or CertManager()
+    tm = token_manager or TokenManager()
 
     handler_cls = MITMProxyHandler
     handler_cls.cert_manager = cm
     handler_cls.token_manager = tm
 
+    # Main dispatcher server (port 8899)
     server = ThreadedTCPServer(("127.0.0.1", port), handler_cls)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     logger.info(f"AGY Multi-Account Token Proxy running on http://127.0.0.1:{port}")
+
     return server, t
+

@@ -32,6 +32,7 @@ from agy_cli_manager.manager import (
     list_account_proxies,
     list_models,
     login_account,
+    logout_current,
     load_state,
     mark_bad,
     probe_profile_identity_via_usage,
@@ -40,6 +41,7 @@ from agy_cli_manager.manager import (
     refresh_account_identity,
     resolve_route,
     rotate_after_failure,
+    run_agy_wrapper,
     clear_account_proxy,
     set_live_dir,
     set_account_proxy,
@@ -150,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("--agy-binary")
     login.add_argument("--timeout-seconds", type=int, default=600)
 
+    sub.add_parser("logout", help="Log out active agy session and delete active Windows credential")
+
     switch = sub.add_parser("switch", help="Switch to a named account")
     switch.add_argument("name")
     activate = sub.add_parser("activate", help="Alias for switch")
@@ -226,6 +230,12 @@ def build_parser() -> argparse.ArgumentParser:
     proxy_cmd.add_argument("--dashboard-host", default="127.0.0.1", help="Dashboard listen host (default: 127.0.0.1)")
     proxy_cmd.add_argument("--dashboard-port", type=int, default=8800, help="Dashboard listen port (default: 8800)")
     proxy_cmd.add_argument("--no-browser", action="store_true", help="Do not open dashboard in web browser automatically")
+
+    run_cmd = sub.add_parser("run", help="Safely run agy via local proxy (with auto-fallback to native agy if proxy is offline)")
+    run_cmd.add_argument("--agy-binary", help="Explicit path to agy binary")
+    run_cmd.add_argument("--proxy-host", default="127.0.0.1", help="Proxy host (default: 127.0.0.1)")
+    run_cmd.add_argument("--proxy-port", type=int, default=8899, help="Proxy port (default: 8899)")
+    run_cmd.add_argument("extra_args", nargs=argparse.REMAINDER, help="Arguments passed through to agy")
     return parser
 
 
@@ -2198,6 +2208,10 @@ def main() -> int:
             stored_name = run_login_with_prompt(paths, name, args.agy_binary, args.timeout_seconds)
             print(f"{'logged-in' if stored_name else 'cancelled'}: {stored_name or name}")
             return 0
+        if args.command == "logout":
+            logout_current(paths)
+            print("logged-out: active agy session cleared")
+            return 0
         if args.command == "switch":
             previous = switch_account(paths, args.name)
             if previous:
@@ -2341,6 +2355,17 @@ def main() -> int:
                 open_browser=not args.no_browser,
             )
             return 0
+        if args.command == "run":
+            extra = list(args.extra_args or [])
+            if extra and extra[0] == "--":
+                extra = extra[1:]
+            return run_agy_wrapper(
+                paths,
+                extra_args=extra,
+                agy_binary=args.agy_binary,
+                proxy_host=args.proxy_host,
+                proxy_port=args.proxy_port,
+            )
     except ValueError as e:
         parser.exit(2, f"error: {e}\n")
     except KeyboardInterrupt:
@@ -2348,6 +2373,13 @@ def main() -> int:
         return 130
 
     parser.exit(2, "error: unknown command\n")
+
+
+def run_entrypoint() -> int:
+    """Shortcut entrypoint for standalone 'agy-run' command."""
+    paths = build_paths(default_root())
+    raw_args = sys.argv[1:]
+    return run_agy_wrapper(paths, extra_args=raw_args)
 
 
 if __name__ == "__main__":

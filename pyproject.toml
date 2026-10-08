@@ -24,6 +24,7 @@ proxy = [
 
 [project.scripts]
 agy-cli-manager = "agy_cli_manager.cli:main"
+agy-run = "agy_cli_manager.cli:run_entrypoint"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

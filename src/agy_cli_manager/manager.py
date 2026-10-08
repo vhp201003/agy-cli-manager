@@ -19,18 +19,111 @@ from pathlib import Path
 from contextlib import contextmanager
 
 if os.name == "nt":
+    import ctypes
     import msvcrt
+
+    class _WindowsCredential(ctypes.Structure):
+        _fields_ = [
+            ("flags", ctypes.c_uint32),
+            ("credential_type", ctypes.c_uint32),
+            ("target_name", ctypes.c_wchar_p),
+            ("comment", ctypes.c_wchar_p),
+            ("last_written", ctypes.c_byte * 8),
+            ("credential_blob_size", ctypes.c_uint32),
+            ("credential_blob", ctypes.POINTER(ctypes.c_char)),
+            ("persist", ctypes.c_uint32),
+            ("attribute_count", ctypes.c_uint32),
+            ("attributes", ctypes.c_void_p),
+            ("target_alias", ctypes.c_wchar_p),
+            ("user_name", ctypes.c_wchar_p),
+        ]
+
+    _ADVAPI32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    _ADVAPI32.CredReadW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    _ADVAPI32.CredReadW.restype = ctypes.c_bool
+
+    _ADVAPI32.CredWriteW.argtypes = [
+        ctypes.POINTER(_WindowsCredential),
+        ctypes.c_uint32,
+    ]
+    _ADVAPI32.CredWriteW.restype = ctypes.c_bool
+
+    _ADVAPI32.CredFree.argtypes = [ctypes.c_void_p]
+    _ADVAPI32.CredFree.restype = ctypes.c_bool
+
+    _ADVAPI32.CredDeleteW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    _ADVAPI32.CredDeleteW.restype = ctypes.c_bool
+
+    def delete_windows_credential_blob(target: str) -> bool:
+        return bool(_ADVAPI32.CredDeleteW(target, 1, 0))
+
+    def read_windows_credential_blob(target: str) -> dict | None:
+        credential_ptr = ctypes.c_void_p()
+        if not _ADVAPI32.CredReadW(target, 1, 0, ctypes.byref(credential_ptr)):
+            return None
+        try:
+            credential = ctypes.cast(
+                credential_ptr, ctypes.POINTER(_WindowsCredential)
+            ).contents
+            blob = ctypes.string_at(
+                credential.credential_blob, credential.credential_blob_size
+            )
+            return json.loads(blob.decode("utf-8", "ignore"))
+        except Exception:
+            return None
+        finally:
+            _ADVAPI32.CredFree(credential_ptr)
+
+    def write_windows_credential_blob(target: str, data: dict, user_name: str = "antigravity") -> bool:
+        try:
+            raw_blob = json.dumps(data).encode("utf-8")
+            c_blob = ctypes.create_string_buffer(raw_blob)
+
+            cred = _WindowsCredential()
+            cred.flags = 0
+            cred.credential_type = 1
+            cred.target_name = target
+            cred.comment = None
+            cred.credential_blob_size = len(raw_blob)
+            cred.credential_blob = ctypes.cast(c_blob, ctypes.POINTER(ctypes.c_char))
+            cred.persist = 2
+            cred.attribute_count = 0
+            cred.attributes = None
+            cred.target_alias = None
+            cred.user_name = user_name
+
+            return bool(_ADVAPI32.CredWriteW(ctypes.byref(cred), 0))
+        except Exception:
+            return False
 else:
     import fcntl
+
+    def read_windows_credential_blob(target: str) -> dict | None:
+        return None
+
+    def write_windows_credential_blob(target: str, data: dict, user_name: str = "antigravity") -> bool:
+        return False
+
+    def delete_windows_credential_blob(target: str) -> bool:
+        return False
 
 from agy_cli_manager.watch import get_log_watch_snapshot
 
 
 MANAGED_PROFILE_FILES = (
     "antigravity-cli/antigravity-oauth-token",
+    "antigravity-cli/agy-cli-manager-credential",
+    "antigravity-cli/credential.json",
 )
 LOGIN_ARTIFACT_SETS = (
     ("antigravity-cli/antigravity-oauth-token",),
+    ("antigravity-cli/agy-cli-manager-credential",),
+    ("antigravity-cli/credential.json",),
 )
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 APPLY_AUTH_EMAIL_PATTERN = re.compile(r"applyAuthResult:\s+email=([^,\s]+)", re.IGNORECASE)
@@ -49,7 +142,7 @@ DEFAULT_FAMILY_FALLBACK_STRATEGY = "same-family-first"
 VALID_FAMILY_FALLBACK_STRATEGIES = ("same-family-first", "same-account-first", "strict-family")
 DEFAULT_SWITCH_DEDUPE_SECONDS = 15
 DEFAULT_SWITCH_HISTORY_LIMIT = 20
-CODE_ASSIST_BASE_URL = "https://cloudcode-pa.googleapis.com"
+CODE_ASSIST_BASE_URL = "https://daily-cloudcode-pa.googleapis.com"
 CODE_ASSIST_USER_AGENT = "antigravity"
 CODE_ASSIST_LOAD_PATH = "/v1internal:loadCodeAssist"
 CODE_ASSIST_QUOTA_PATH = "/v1internal:retrieveUserQuota"
@@ -507,7 +600,7 @@ def resolve_agy_binary(agy_binary: str | None = None) -> str:
     if env_binary:
         return env_binary
 
-    path_binary = shutil.which("agy")
+    path_binary = shutil.which("agy") or shutil.which("agy.exe")
     if path_binary:
         return path_binary
 
@@ -515,9 +608,76 @@ def resolve_agy_binary(agy_binary: str | None = None) -> str:
     if install_sibling.is_file() and os.access(install_sibling, os.X_OK):
         return str(install_sibling)
 
+    # Check Windows %LOCALAPPDATA%/agy/bin/agy.exe
+    if os.name == "nt":
+        local_app = Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin" / "agy.exe"
+        if local_app.is_file():
+            return str(local_app)
+
     raise ValueError(
         "agy binary not found. Use --agy-binary, set AGY_BINARY, or put `agy` in PATH."
     )
+
+
+def is_proxy_available(host: str = "127.0.0.1", port: int = 8899, timeout: float = 0.2) -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
+def resolve_ca_bundle_path(paths: ManagerPaths | None = None) -> Path | None:
+    candidates = []
+    # 1. Repo root / certs / bundle.crt (manager.py is in src/agy_cli_manager, so parents[2] is repo root)
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.append(repo_root / "certs" / "bundle.crt")
+    # 2. paths.root / certs / bundle.crt
+    if paths:
+        candidates.append(paths.root / "certs" / "bundle.crt")
+    # 3. ~/.agy-cli-manager / certs / bundle.crt
+    candidates.append(Path.home() / ".agy-cli-manager" / "certs" / "bundle.crt")
+    for c in candidates:
+        if c.is_file() and c.stat().st_size > 0:
+            return c
+    return None
+
+
+def run_agy_wrapper(
+    paths: ManagerPaths,
+    extra_args: list[str] | None = None,
+    agy_binary: str | None = None,
+    proxy_host: str = "127.0.0.1",
+    proxy_port: int = 8899,
+) -> int:
+    resolved_bin = resolve_agy_binary(agy_binary)
+    proxy_online = is_proxy_available(proxy_host, proxy_port)
+    env = os.environ.copy()
+
+    if proxy_online:
+        proxy_url = f"http://{proxy_host}:{proxy_port}"
+        env["HTTP_PROXY"] = proxy_url
+        env["HTTPS_PROXY"] = proxy_url
+        bundle_path = resolve_ca_bundle_path(paths)
+        if bundle_path:
+            env["SSL_CERT_FILE"] = str(bundle_path)
+            print(f"[AGY-RUN] Proxy online -> {proxy_url} (SSL cert: {bundle_path.name})")
+        else:
+            print(f"[AGY-RUN] Proxy online -> {proxy_url} (No custom CA bundle detected)")
+    else:
+        # Ensure proxy environment variables don't bleed through
+        env.pop("HTTP_PROXY", None)
+        env.pop("HTTPS_PROXY", None)
+        env.pop("SSL_CERT_FILE", None)
+        print("[AGY-RUN] Proxy is offline/unreachable. Running native agy directly.")
+
+    cmd = [resolved_bin] + (extra_args or [])
+    try:
+        proc = subprocess.run(cmd, env=env)
+        return proc.returncode
+    except KeyboardInterrupt:
+        return 130
 
 
 def _copy_managed_profile_files(source: Path, target: Path) -> None:
@@ -2241,8 +2401,10 @@ def save_account_profile(paths: ManagerPaths, name: str, source_dir: Path, overw
     profile_source = _resolve_profile_source(source_dir)
     if not profile_source.exists() or not profile_source.is_dir():
         raise ValueError(f"Usable profile source not found in {source_dir}")
-    if not profile_has_login_artifacts(profile_source):
-        raise ValueError(f"Profile source is missing required auth files: {profile_source}")
+    has_artifacts = profile_has_login_artifacts(profile_source)
+    if not has_artifacts:
+        if not (os.name == "nt" and read_windows_credential_blob("gemini:antigravity")):
+            raise ValueError(f"Profile source is missing required auth files: {profile_source}")
 
     target = account_dir(paths, name)
     target_exists = target.exists()
@@ -2253,6 +2415,15 @@ def save_account_profile(paths: ManagerPaths, name: str, source_dir: Path, overw
     else:
         target.mkdir(parents=True, exist_ok=False)
     _copy_account_profile(home_source, target)
+    if os.name == "nt" and paths.root == default_root():
+        active_cred = read_windows_credential_blob("gemini:antigravity")
+        if active_cred:
+            write_windows_credential_blob(f"agy-cli-manager:{name}", active_cred)
+            target_cred_file = target / ".gemini" / "antigravity-cli" / "credential.json"
+            target_cred_file.parent.mkdir(parents=True, exist_ok=True)
+            target_cred_file.write_text(json.dumps(active_cred, indent=2), encoding="utf-8")
+            marker_file = target / ".gemini" / "antigravity-cli" / "agy-cli-manager-credential"
+            marker_file.write_text(f"agy-cli-manager:{name}\n", encoding="utf-8")
     identity = _best_effort_saved_profile_identity(target)
 
     with manager_lock(paths):
@@ -2310,6 +2481,27 @@ def import_current(paths: ManagerPaths, name: str, source_dir: Path | None = Non
     add_account(paths, name, live_dir)
 
 
+def _sync_windows_credential_for_switch(paths: ManagerPaths, name: str) -> bool:
+    if os.name != "nt" or paths.root != default_root():
+        return False
+    target = f"agy-cli-manager:{name}"
+    blob = read_windows_credential_blob(target)
+    if not blob:
+        cred_file = account_dir(paths, name) / ".gemini" / "antigravity-cli" / "credential.json"
+        if not cred_file.is_file():
+            cred_file = account_dir(paths, name) / "antigravity-cli" / "credential.json"
+        if cred_file.is_file():
+            try:
+                blob = json.loads(cred_file.read_text(encoding="utf-8"))
+            except Exception:
+                blob = None
+            if blob:
+                write_windows_credential_blob(target, blob)
+    if blob:
+        return write_windows_credential_blob("gemini:antigravity", blob)
+    return False
+
+
 def _copy_active_runtime(paths: ManagerPaths, name: str) -> None:
     src = account_dir(paths, name)
     if not src.exists():
@@ -2326,6 +2518,10 @@ def _sync_runtime_to_live_dir(paths: ManagerPaths, state: dict) -> None:
     if live_dir is None:
         return
     _copy_account_profile(paths.runtime_dir, live_dir.parent)
+    if os.name == "nt":
+        active = state.get("active")
+        if active:
+            _sync_windows_credential_for_switch(paths, active)
 
 
 def switch_account(paths: ManagerPaths, name: str) -> str:
@@ -2547,6 +2743,19 @@ def update_switch_policy(
         state["switch_policy"] = policy
         save_state(paths, state)
         return dict(policy)
+
+
+def logout_current(paths: ManagerPaths) -> bool:
+    if os.name == "nt":
+        delete_windows_credential_blob("gemini:antigravity")
+    with manager_lock(paths):
+        state = sync_state_from_disk(paths, load_state(paths))
+        live_dir = get_live_dir(state)
+        if live_dir and live_dir.is_dir():
+            _remove_managed_profile_files(live_dir)
+        state["active"] = None
+        save_state(paths, state)
+    return True
 
 
 def set_enabled(paths: ManagerPaths, name: str, enabled: bool) -> None:

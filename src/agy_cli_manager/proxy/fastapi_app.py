@@ -152,13 +152,13 @@ async def refresh_account(name: str):
 
 
 @app.post("/api/warmup-all")
-async def warmup_all(model: str = "gemini-2.5-flash"):
+async def warmup_all(model: str | None = None):
     res = tm_instance.warmup_all_accounts(model=model)
     return {"message": "Warmup completed for all accounts", "results": res, "status": tm_instance.get_status()}
 
 
 @app.post("/api/accounts/{name}/warmup")
-async def warmup_account(name: str, model: str = "gemini-2.5-flash"):
+async def warmup_account(name: str, model: str | None = None):
     ok, msg = tm_instance.warmup_account(name, model=model)
     tm_instance.fetch_account_quota(name)
     return {"success": ok, "message": msg, "account": tm_instance.get_status().get(name)}
@@ -170,23 +170,6 @@ async def clear_cooldown(name: str):
     return {"message": f"Cleared cooldown for {name}", "status": tm_instance.get_status().get(name)}
 
 
-@app.post("/api/test-request")
-async def send_test_request():
-    cm = cert_manager.CertManager()
-    bundle = cm.get_ca_bundle_path()
-    try:
-        import subprocess
-        proc = subprocess.run([
-            "curl.exe", "-s", "-x", "http://127.0.0.1:8899",
-            "--ssl-no-revoke", "--cacert", str(bundle),
-            "https://daily-cloudcode-pa.googleapis.com/v1internal:listExperiments",
-            "-d", '{"project":"aicode-consumers"}',
-            "-H", "Content-Type: application/json",
-            "-H", "Authorization: Bearer TEST_DASHBOARD_INBOUND_TOKEN"
-        ], capture_output=True, text=True, timeout=10)
-        return {"success": proc.returncode == 0}
-    except Exception as exc:
-        return {"success": False, "error": str(exc)}
 
 
 @app.get("/api/stream")
@@ -219,96 +202,135 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <title>AGY Multi-Account Router & Quota Telemetry</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #070d17;
-      --card-bg: #0f172a;
-      --sub-card: #0b1120;
-      --border: #1e293b;
+      --bg: #09090b;
+      --card-bg: #0d0d10;
+      --sub-card: #08080a;
+      --border: #222226;
       --border-focus: #38bdf8;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
+      --border-hover: #323238;
+      --text: #ededed;
+      --text-muted: #71717a;
       --accent: #38bdf8;
-      --accent-glow: rgba(56, 189, 248, 0.2);
+      --accent-glow: rgba(56, 189, 248, 0.12);
       --green: #22c55e;
       --yellow: #f59e0b;
       --red: #ef4444;
       --purple: #c084fc;
-      --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       --font-mono: 'JetBrains Mono', monospace;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text); font-family: var(--font-sans); padding: 20px 24px; min-height: 100vh; }
+    body { background: var(--bg); color: var(--text); font-family: var(--font-sans); padding: 24px; min-height: 100vh; line-height: 1.5; }
     
     /* Top Header */
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 16px; flex-wrap: wrap; gap: 16px; }
-    .title-group h1 { font-size: 1.4rem; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 10px; letter-spacing: -0.5px; }
-    .pulse-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulse 2s infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.2); } }
-    .subtitle { font-size: 0.82rem; color: var(--text-muted); margin-top: 4px; font-family: var(--font-mono); }
-    .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 18px; flex-wrap: wrap; gap: 16px; }
+    .title-group h1 { font-size: 1.25rem; font-weight: 600; color: #fff; display: flex; align-items: center; gap: 10px; letter-spacing: -0.02em; }
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2.5s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(1.1); } }
+    .subtitle { font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; font-family: var(--font-mono); }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     
-    /* Buttons with SVGs, Press Physics & Anti-Spam Loading */
+    /* Vercel Minimalist Tool Buttons */
     button { 
-      background: var(--card-bg); 
+      background: #0a0a0c; 
       border: 1px solid var(--border); 
-      color: var(--text); 
-      padding: 8px 14px; 
-      border-radius: 8px; 
+      color: #d4d4d8; 
+      padding: 6px 12px; 
+      border-radius: 6px; 
       cursor: pointer; 
-      font-size: 0.82rem; 
-      font-weight: 600; 
+      font-size: 0.78rem; 
+      font-weight: 500; 
       font-family: var(--font-sans); 
-      transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1); 
+      transition: all 0.15s ease; 
       display: inline-flex; 
       align-items: center; 
-      gap: 7px; 
+      justify-content: center;
+      gap: 6px; 
       user-select: none;
+      line-height: 1.2;
+      height: 30px;
     }
     button:hover:not(:disabled) { 
-      background: var(--border); 
+      background: #18181b; 
       color: #fff; 
-      transform: translateY(-1px);
+      border-color: var(--border-hover);
     }
     button:active:not(:disabled) { 
-      transform: translateY(1px) scale(0.98); 
+      transform: scale(0.98); 
     }
     button:disabled { 
-      opacity: 0.55; 
+      opacity: 0.45; 
       cursor: not-allowed; 
-      filter: grayscale(30%);
       transform: none !important;
     }
-    button.primary { background: #0284c7; border-color: #38bdf8; color: #fff; }
-    button.primary:hover:not(:disabled) { background: #38bdf8; color: #000; box-shadow: 0 0 12px var(--accent-glow); }
-    button.success { background: #15803d; border-color: #22c55e; color: #fff; }
-    button.success:hover:not(:disabled) { background: #22c55e; color: #000; box-shadow: 0 0 12px rgba(34, 197, 94, 0.25); }
-    button.purple { background: #7e22ce; border-color: #c084fc; color: #fff; }
-    button.purple:hover:not(:disabled) { background: #c084fc; color: #000; box-shadow: 0 0 12px rgba(192, 132, 252, 0.25); }
-    button.warmup { background: #c2410c; border-color: #fb923c; color: #fff; }
-    button.warmup:hover:not(:disabled) { background: #f97316; color: #000; box-shadow: 0 0 12px rgba(249, 115, 22, 0.3); }
-    
-    .btn-svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s; }
-    .spinning { animation: spin 0.8s linear infinite; }
+    button.primary { 
+      background: #ededed; 
+      border-color: #ededed; 
+      color: #000; 
+      font-weight: 600; 
+    }
+    button.primary:hover:not(:disabled) { 
+      background: #ffffff; 
+      border-color: #ffffff; 
+      color: #000;
+    }
+    button.card-btn {
+      height: 24px;
+      padding: 3px 8px;
+      font-size: 0.72rem;
+      border-radius: 5px;
+      color: var(--text-muted);
+    }
+    button.card-btn:hover:not(:disabled) {
+      color: #fff;
+    }
+    .btn-svg { 
+      width: 13px; 
+      height: 13px; 
+      fill: none; 
+      stroke: currentColor; 
+      stroke-width: 2; 
+      stroke-linecap: round; 
+      stroke-linejoin: round; 
+      flex-shrink: 0;
+    }
+    .btn-spinner {
+      width: 12px;
+      height: 12px;
+      border: 1.5px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: inline-block;
+      flex-shrink: 0;
+    }
     @keyframes spin { 100% { transform: rotate(360deg); } }
     
     /* KPI Strip */
-    .kpi-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 20px; }
-    .kpi-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; position: relative; }
-    .kpi-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
-    .kpi-value { font-size: 1.45rem; font-weight: 700; font-family: var(--font-mono); display: flex; align-items: baseline; gap: 6px; }
-    .kpi-sub { font-size: 0.76rem; color: var(--text-muted); margin-top: 4px; }
+    .kpi-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .kpi-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; position: relative; }
+    .kpi-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); font-weight: 600; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; font-family: var(--font-mono); }
+    .kpi-value { font-size: 1.5rem; font-weight: 600; font-family: var(--font-mono); display: flex; align-items: baseline; gap: 6px; letter-spacing: -0.03em; }
+    .kpi-sub { font-size: 0.74rem; color: #52525b; margin-top: 4px; }
     
     /* Account Grid */
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 16px; margin-bottom: 24px; }
-    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 18px; position: relative; transition: border-color 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
-    .card:hover { border-color: #334155; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-bottom: 24px; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; position: relative; transition: border-color 0.2s; }
+    .card:hover { border-color: var(--border-hover); }
     .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
-    .acc-email { font-size: 0.95rem; font-weight: 600; color: #fff; font-family: var(--font-mono); display: flex; align-items: center; gap: 6px; }
-    .badge { font-size: 0.7rem; padding: 3px 8px; border-radius: 9999px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-    .badge.active { background: rgba(34, 197, 94, 0.12); color: var(--green); border: 1px solid var(--green); }
-    .badge.cooldown { background: rgba(245, 158, 11, 0.12); color: var(--yellow); border: 1px solid var(--yellow); }
+    .acc-email { font-size: 0.85rem; font-weight: 600; color: #fff; font-family: var(--font-mono); }
+    .badge { font-size: 0.68rem; padding: 2px 7px; border-radius: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--font-mono); }
+    .badge.active { background: rgba(34, 197, 94, 0.08); color: var(--green); border: 1px solid rgba(34, 197, 94, 0.25); }
+    .badge.sticky { background: rgba(56, 189, 248, 0.08); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.25); }
+    .badge.cooldown { background: rgba(245, 158, 11, 0.08); color: var(--yellow); border: 1px solid rgba(245, 158, 11, 0.25); }
+    
+    /* Modal Tabs UI */
+    .modal-tab-bar { display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 10px; }
+    .modal-tab-btn { background: transparent; border: 1px solid var(--border); color: var(--text-muted); padding: 5px 12px; border-radius: 5px; font-size: 0.75rem; cursor: pointer; transition: all 0.15s; font-family: var(--font-mono); }
+    .modal-tab-btn.active, .modal-tab-btn:hover { background: #18181b; color: #fff; border-color: #38bdf8; }
     
     /* Quota Bars */
     .quota-box { background: var(--sub-card); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
@@ -323,7 +345,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     
     /* Telemetry Table Container */
     .telemetry-container { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
-    .telemetry-toolbar { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; background: #0c1322; }
+    .telemetry-toolbar { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; background: #111114; }
     .filter-group { display: flex; gap: 6px; align-items: center; }
     .filter-btn { padding: 5px 10px; border-radius: 6px; font-size: 0.76rem; background: transparent; border: 1px solid var(--border); color: var(--text-muted); cursor: pointer; }
     .filter-btn.active, .filter-btn:hover { background: var(--border); color: #fff; }
@@ -332,25 +354,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     
     .table-pane { overflow-y: auto; overflow-x: auto; max-height: 560px; }
     table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.82rem; }
-    th { color: var(--text-muted); padding: 10px 14px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: #0d1527; font-weight: 600; font-family: var(--font-sans); z-index: 2; }
+    th { color: var(--text-muted); padding: 10px 14px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: #131317; font-weight: 600; font-family: var(--font-sans); z-index: 2; }
     td { padding: 11px 14px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; font-family: var(--font-mono); }
-    tr.log-item:hover { background: rgba(56, 189, 248, 0.04); }
+    tr.log-item:hover { background: rgba(255, 255, 255, 0.02); }
     .highlight-new { animation: rowHighlight 1.5s ease-out; }
     @keyframes rowHighlight { 0% { background: var(--accent-glow); } 100% { background: transparent; } }
     
     /* Chips & Badges */
     .pill { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; font-family: var(--font-mono); }
-    .pill.get { background: #0369a1; color: #e0f2fe; }
-    .pill.post { background: #15803d; color: #dcfce7; }
-    .code-chip { background: #070d17; padding: 2px 6px; border-radius: 4px; font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid rgba(255,255,255,0.08); }
-    .btn-inspect { background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.25); color: var(--accent); padding: 4px 10px; border-radius: 6px; font-size: 0.74rem; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
-    .btn-inspect:hover { background: var(--accent); color: #000; border-color: var(--accent); }
+    .pill.get { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+    .pill.post { background: #142a1f; color: #4ade80; border: 1px solid #1e452e; }
+    .code-chip { background: #141418; padding: 2px 6px; border-radius: 4px; font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid var(--border); }
+    .btn-inspect { background: #18181b; border: 1px solid var(--border); color: #d4d4d8; padding: 4px 10px; border-radius: 6px; font-size: 0.74rem; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+    .btn-inspect:hover { background: #27272a; color: #fff; border-color: #3f3f46; }
 
     /* Modal Dialog */
     .modal-backdrop { 
       position: fixed; 
       inset: 0; 
-      background: rgba(4, 8, 16, 0.8); 
+      background: rgba(0, 0, 0, 0.75); 
       display: none; 
       align-items: center; 
       justify-content: center; 
@@ -364,15 +386,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       opacity: 1; 
     }
     .modal-box { 
-      background: #0d1527; 
-      border: 1px solid #334155; 
-      border-radius: 14px; 
+      background: #0f0f12; 
+      border: 1px solid var(--border); 
+      border-radius: 12px; 
       width: 90%; 
       max-width: 860px; 
       max-height: 85vh; 
       display: flex; 
       flex-direction: column; 
-      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7); 
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.8); 
       transform: scale(0.96) translateY(10px);
       transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
@@ -385,9 +407,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       display: flex; 
       justify-content: space-between; 
       align-items: center; 
-      background: #090e1a;
-      border-top-left-radius: 14px;
-      border-top-right-radius: 14px;
+      background: #141418;
+      border-top-left-radius: 12px;
+      border-top-right-radius: 12px;
     }
     .modal-title { font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); }
     .modal-close { 
@@ -407,7 +429,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     
     /* JSON Syntax Colors */
     .json-container {
-      background: #050811;
+      background: #08080a;
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 16px;
@@ -437,14 +459,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       pointer-events: none;
     }
     .toast-msg {
-      background: #0f172a;
-      border: 1px solid #334155;
+      background: #141417;
+      border: 1px solid #2e2e34;
       color: #fff;
       padding: 10px 16px;
       border-radius: 8px;
       font-size: 0.8rem;
       font-family: var(--font-sans);
-      box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.5);
       display: flex;
       align-items: center;
       gap: 8px;
@@ -470,32 +492,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="actions">
       <!-- Trigger 5H Quota Button -->
-      <button onclick="warmupAllAccounts(this)" class="warmup" id="btnWarmup">
+      <button onclick="warmupAllAccounts(this)" id="btnWarmup" title="Trigger 5H Window on all accounts">
         <svg class="btn-svg" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
-        <span>Trigger 5H Window</span>
-      </button>
-
-      <!-- Test Request Button -->
-      <button onclick="sendTestRequest(this)" class="success" id="btnTestReq">
-        <svg class="btn-svg" viewBox="0 0 24 24"><path d="M10 2v7.31L4.1 19.38A2 2 0 0 0 5.8 22h12.4a2 2 0 0 0 1.7-2.62L14 9.31V2z"/><line x1="8.5" y1="2" x2="15.5" y2="2"/><line x1="14" y1="9.3" x2="10" y2="9.3"/></svg>
-        <span>Test Request</span>
+        <span>Warmup All</span>
       </button>
 
       <!-- Sync Quotas Button -->
-      <button onclick="syncAllQuotas(this)" class="purple" id="btnSyncQuotas">
-        <svg class="btn-svg" viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      <button onclick="syncAllQuotas(this)" class="primary" id="btnSyncQuotas" title="Sync live quotas from Google">
+        <svg class="btn-svg" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
         <span>Sync Quotas</span>
       </button>
 
       <!-- Refresh Tokens Button -->
-      <button onclick="refreshAllTokens(this)" class="primary" id="btnRefreshTokens">
+      <button onclick="refreshAllTokens(this)" id="btnRefreshTokens" title="Refresh Google OAuth tokens">
         <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         <span>Refresh Tokens</span>
       </button>
 
       <!-- Reload Button -->
-      <button onclick="fetchStatus(this)" id="btnReload">
-        <svg class="btn-svg" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+      <button onclick="fetchStatus(this)" id="btnReload" title="Reload status data">
+        <svg class="btn-svg" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         <span>Reload</span>
       </button>
     </div>
@@ -509,17 +525,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="kpi-sub">Ready for LLM routing</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Gemini Capacity <span style="color:var(--accent)">🔷</span></div>
+      <div class="kpi-label">Gemini Capacity <span style="color:var(--accent)">●</span></div>
       <div class="kpi-value" id="kpiGeminiAvg" style="color:var(--accent);">-- %</div>
       <div class="kpi-sub">5h pool average capacity</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Claude Capacity <span style="color:var(--purple)">🟣</span></div>
+      <div class="kpi-label">Claude Capacity <span style="color:var(--purple)">●</span></div>
       <div class="kpi-value" id="kpiClaudeAvg" style="color:var(--purple);">-- %</div>
       <div class="kpi-sub">5h pool average capacity</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Intercepted Traffic <span>⚡</span></div>
+      <div class="kpi-label">Intercepted Traffic <span style="color:var(--text-muted)">●</span></div>
       <div class="kpi-value" id="kpiTotalReqs">0</div>
       <div class="kpi-sub" id="kpiSyncStatus">SSE Connected</div>
     </div>
@@ -539,7 +555,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="filter-btn" onclick="setFilter('errors', this)">Errors</button>
       </div>
       <div>
-        <input type="text" id="searchInput" class="search-box" placeholder="🔍 Search endpoint or account..." oninput="applyFilters()">
+        <input type="text" id="searchInput" class="search-box" placeholder="Filter endpoint or account..." oninput="applyFilters()">
       </div>
     </div>
 
@@ -549,12 +565,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <tr>
             <th>Time</th>
             <th>Method</th>
+            <th>Model / API</th>
             <th>Endpoint</th>
             <th>Account</th>
-            <th>Token Override (AGY ➔ Google)</th>
             <th>Status</th>
             <th>Latency</th>
-            <th>Payload</th>
+            <th>Telemetry</th>
           </tr>
         </thead>
         <tbody id="logBody">
@@ -564,11 +580,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Modal Dialog: Payload & Header Inspector -->
+  <!-- Modal Dialog: Payload & Response Inspector -->
   <div class="modal-backdrop" id="payloadModal" onclick="if(event.target===this)closeModal()">
     <div class="modal-box">
       <div class="modal-header">
-        <div class="modal-title" id="modalTitle">Request Payload Details</div>
+        <div class="modal-title" id="modalTitle">Request & Response Telemetry</div>
         <button class="modal-close" onclick="closeModal()">
           <svg class="btn-svg" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
@@ -576,21 +592,42 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="modal-body">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
           <div id="modalMeta" style="font-size:0.8rem; color:var(--text-muted); font-family:var(--font-mono);"></div>
-          <button onclick="copyModalPayload(this)" class="primary" style="padding:5px 12px; font-size:0.75rem;">
+          <button onclick="copyCurrentModalContent(this)" class="primary" style="padding:5px 12px; font-size:0.75rem;">
             <svg class="btn-svg" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            <span>Copy JSON</span>
+            <span>Copy View</span>
           </button>
         </div>
 
-        <div style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:700; font-family:var(--font-mono);">
-          Header Override Flow:
+        <!-- 3 Tabs: Request, Response, Raw Tokens -->
+        <div class="modal-tab-bar">
+          <button class="modal-tab-btn active" id="tabBtnReq" onclick="switchModalTab('request')">Request Payload</button>
+          <button class="modal-tab-btn" id="tabBtnResp" onclick="switchModalTab('response')">Response Output</button>
+          <button class="modal-tab-btn" id="tabBtnRaw" onclick="switchModalTab('tokens')">Token Override Flow</button>
         </div>
-        <div style="font-size:0.75rem; background:rgba(255,255,255,0.03); padding:10px 12px; border-radius:8px; border:1px solid var(--border); font-family:var(--font-mono);" id="modalHeaderFlow"></div>
 
-        <div style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:700; font-family:var(--font-mono);">
-          Formatted Request Body:
+        <!-- Tab 1: Request -->
+        <div id="modalTabRequest" class="modal-tab-content">
+          <div style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:700; font-family:var(--font-mono); margin-bottom:6px;">
+            Inbound Request Body / Prompts:
+          </div>
+          <div class="json-container" id="modalJsonContainer"></div>
         </div>
-        <div class="json-container" id="modalJsonContainer"></div>
+
+        <!-- Tab 2: Response -->
+        <div id="modalTabResponse" class="modal-tab-content" style="display:none;">
+          <div style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:700; font-family:var(--font-mono); margin-bottom:6px;">
+            Upstream Response Output / Stream Preview:
+          </div>
+          <div class="json-container" id="modalRespContainer"></div>
+        </div>
+
+        <!-- Tab 3: Tokens Override -->
+        <div id="modalTabTokens" class="modal-tab-content" style="display:none;">
+          <div style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:700; font-family:var(--font-mono); margin-bottom:6px;">
+            OAuth Token Injection Flow:
+          </div>
+          <div style="font-size:0.8rem; background:rgba(255,255,255,0.03); padding:12px 14px; border-radius:8px; border:1px solid var(--border); font-family:var(--font-mono);" id="modalHeaderFlow"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -606,12 +643,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       if (!btn || btn.disabled) return;
       btn.disabled = true;
       const svg = btn.querySelector('.btn-svg');
-      if (svg) svg.classList.add('spinning');
+      let spinner = null;
+      if (svg) {
+        svg.style.display = 'none';
+        spinner = document.createElement('span');
+        spinner.className = 'btn-spinner';
+        btn.insertBefore(spinner, svg);
+      }
       try {
         await asyncFn();
       } finally {
         setTimeout(() => {
-          if (svg) svg.classList.remove('spinning');
+          if (spinner) spinner.remove();
+          if (svg) svg.style.display = '';
           btn.disabled = false;
         }, 600); // 600ms anti-spam cooloff
       }
@@ -680,17 +724,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       let gemTotal = 0, claudeTotal = 0, count = 0;
       accs.forEach(a => {
         const q = a.quota || {};
-        if (q.gemini && q.gemini['5h'] && q.gemini['weekly'])
-          gemTotal += Math.min(q.gemini['5h'].percent, q.gemini['weekly'].percent);
-        else if (q.gemini && q.gemini['5h']) gemTotal += q.gemini['5h'].percent;
-        if (q.third_party && q.third_party['5h'] && q.third_party['weekly'])
-          claudeTotal += Math.min(q.third_party['5h'].percent, q.third_party['weekly'].percent);
-        else if (q.third_party && q.third_party['5h']) claudeTotal += q.third_party['5h'].percent;
+        const g5h = (q.gemini && q.gemini['5h']) || { percent: 100 };
+        const gW = (q.gemini && q.gemini['weekly']) || { percent: 100 };
+        const c5h = (q.third_party && q.third_party['5h']) || { percent: 100 };
+        const cW = (q.third_party && q.third_party['weekly']) || { percent: 100 };
+
+        const gExhausted = gW.disabled || (gW.percent <= 5.0 && Boolean(gW.reset_time));
+        const cExhausted = cW.disabled || (cW.percent <= 5.0 && Boolean(cW.reset_time));
+
+        gemTotal += gExhausted ? 0 : g5h.percent;
+        claudeTotal += cExhausted ? 0 : c5h.percent;
         count++;
       });
       if (count > 0) {
-        document.getElementById('kpiGeminiAvg').innerText = `${(gemTotal / count).toFixed(1)}%`;
-        document.getElementById('kpiClaudeAvg').innerText = `${(claudeTotal / count).toFixed(1)}%`;
+        document.getElementById('kpiGeminiAvg').innerText = `${(gemTotal / count).toFixed(2)}%`;
+        document.getElementById('kpiClaudeAvg').innerText = `${(claudeTotal / count).toFixed(2)}%`;
       }
       document.getElementById('kpiTotalReqs').innerText = data.total_requests_intercepted || renderedIds.size;
     }
@@ -699,16 +747,39 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const container = document.getElementById('accountsGrid');
       container.innerHTML = '';
       for (const [name, acc] of Object.entries(accounts)) {
-        const badgeClass = acc.in_cooldown ? 'cooldown' : 'active';
-        const badgeText = acc.in_cooldown ? `Cooldown (${acc.cooldown_remaining_sec}s)` : 'Ready';
-
         const q = acc.quota || {};
-        const g5h = (q.gemini && q.gemini['5h']) || { percent: 100, reset_time: null };
-        const gWeekly = (q.gemini && q.gemini['weekly']) || { percent: 100, reset_time: null };
-        const c5h = (q.third_party && q.third_party['5h']) || { percent: 100, reset_time: null };
-        const cWeekly = (q.third_party && q.third_party['weekly']) || { percent: 100, reset_time: null };
-        const c5hEffective = { ...c5h, percent: Math.min(c5h.percent, cWeekly.percent) };
-        const g5hEffective = { ...g5h, percent: Math.min(g5h.percent, gWeekly.percent) };
+        const g5h = (q.gemini && q.gemini['5h']) || { percent: 100, reset_time: null, disabled: false };
+        const gWeekly = (q.gemini && q.gemini['weekly']) || { percent: 100, reset_time: null, disabled: false };
+        const c5h = (q.third_party && q.third_party['5h']) || { percent: 100, reset_time: null, disabled: false };
+        const cWeekly = (q.third_party && q.third_party['weekly']) || { percent: 100, reset_time: null, disabled: false };
+
+        const cWeeklyExhausted = cWeekly.disabled || (cWeekly.percent <= 5.0 && Boolean(cWeekly.reset_time));
+        const gWeeklyExhausted = gWeekly.disabled || (gWeekly.percent <= 5.0 && Boolean(gWeekly.reset_time));
+        const c5hExhausted = c5h.disabled || (c5h.percent <= 5.0 && Boolean(c5h.reset_time));
+        const g5hExhausted = g5h.disabled || (g5h.percent <= 5.0 && Boolean(g5h.reset_time));
+
+        const isGeminiHealthy = !gWeeklyExhausted && !g5hExhausted;
+        const isClaudeHealthy = !cWeeklyExhausted && !c5hExhausted;
+
+        let badgeClass = 'active';
+        let badgeText = 'POOL ACTIVE';
+        if (acc.in_cooldown) {
+          badgeClass = 'cooldown';
+          badgeText = `COOLDOWN (${acc.cooldown_remaining_sec}s)`;
+        } else if (!isGeminiHealthy && !isClaudeHealthy) {
+          badgeClass = 'cooldown';
+          badgeText = 'ALL EXHAUSTED';
+        } else if (!isClaudeHealthy) {
+          badgeClass = 'active';
+          badgeText = 'GEMINI ONLY';
+        } else if (!isGeminiHealthy) {
+          badgeClass = 'active';
+          badgeText = 'CLAUDE ONLY';
+        }
+
+        // 5h limit represents the current 5-hour session capacity; only show 0% if weekly quota is exhausted or 5h <= 5.0%
+        const c5hEffectivePct = cWeeklyExhausted ? 0 : c5h.percent;
+        const g5hEffectivePct = gWeeklyExhausted ? 0 : g5h.percent;
 
         const emailDisplay = acc.email && acc.email.includes('@') ? acc.email : (acc.email || name);
         const nameDisplay = acc.display_name && acc.display_name !== name ? acc.display_name : '';
@@ -718,7 +789,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="card-header">
             <div style="min-width: 0; flex: 1; padding-right: 8px;">
               <div class="acc-email" title="${emailDisplay}">
-                <svg class="btn-svg" style="width:14px; height:14px; color:var(--text-muted);" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
                 <span>${emailDisplay}</span>
               </div>
               <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
@@ -732,69 +802,69 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <!-- Section 1: Gemini Quota -->
           <div class="quota-box">
             <div class="quota-title" style="color: var(--accent);">
-              <span>🔷 Gemini Limits</span>
-              <span style="font-size:0.7rem; color:var(--text-muted);">Pro & Flash</span>
+              <span>Gemini Limits</span>
+              <span style="font-size:0.7rem; color:${isGeminiHealthy ? 'var(--green)' : 'var(--red)'}; font-weight: 600;">${isGeminiHealthy ? '● Ready' : '● Exhausted'}</span>
             </div>
             <div class="quota-row">
               <div class="quota-row-header">
-                <span>5-Hour Limit:</span>
-                <b>${g5hEffective.percent}%</b>
-              </div>
-              <div class="bar-bg">
-                <div class="bar-fill" style="width: ${g5hEffective.percent}%; background: ${getBarColor(g5hEffective.percent, 'var(--accent)')}"></div>
-              </div>
-              <div class="reset-label">${formatTimeUntil(g5h.reset_time)}</div>
-            </div>
-            <div class="quota-row" style="margin-top: 8px;">
-              <div class="quota-row-header">
                 <span>Weekly Limit:</span>
-                <b>${gWeekly.percent}%</b>
+                <b>${gWeeklyExhausted ? '<span style="color:var(--red);">Exhausted (≤5%)</span>' : Number(gWeekly.percent).toFixed(2) + '%'}</b>
               </div>
               <div class="bar-bg">
                 <div class="bar-fill" style="width: ${gWeekly.percent}%; background: ${getBarColor(gWeekly.percent, 'var(--accent)')}"></div>
               </div>
               <div class="reset-label">${formatTimeUntil(gWeekly.reset_time)}</div>
             </div>
+            <div class="quota-row" style="margin-top: 8px;">
+              <div class="quota-row-header">
+                <span>Five Hour Limit:</span>
+                <b>${gWeeklyExhausted ? '<span style="color:var(--red);">0% (Weekly Limit)</span>' : (g5h.percent <= 5.0 && g5h.reset_time ? '<span style="color:var(--red);">Exhausted (≤5%)</span>' : Number(g5hEffectivePct).toFixed(2) + '%')}</b>
+              </div>
+              <div class="bar-bg">
+                <div class="bar-fill" style="width: ${g5hEffectivePct}%; background: ${getBarColor(g5hEffectivePct, 'var(--accent)')}"></div>
+              </div>
+              <div class="reset-label">${gWeeklyExhausted ? 'Blocked by weekly limit' : formatTimeUntil(g5h.reset_time)}</div>
+            </div>
           </div>
 
           <!-- Section 2: Claude & GPT Quota -->
           <div class="quota-box" style="border-color: rgba(192, 132, 252, 0.2);">
             <div class="quota-title" style="color: var(--purple);">
-              <span>🟣 Claude & GPT Limits</span>
-              <span style="font-size:0.7rem; color:var(--text-muted);">Sonnet & Opus</span>
+              <span>Claude & GPT Limits</span>
+              <span style="font-size:0.7rem; color:${isClaudeHealthy ? 'var(--green)' : 'var(--red)'}; font-weight: 600;">${isClaudeHealthy ? '● Ready' : '● Exhausted'}</span>
             </div>
             <div class="quota-row">
               <div class="quota-row-header">
-                <span>5-Hour Limit:</span>
-                <b>${c5hEffective.percent}%</b>
-              </div>
-              <div class="bar-bg">
-                <div class="bar-fill" style="width: ${c5hEffective.percent}%; background: ${getBarColor(c5hEffective.percent, 'var(--purple)')}"></div>
-              </div>
-              <div class="reset-label">${formatTimeUntil(c5h.reset_time)}</div>
-            </div>
-            <div class="quota-row" style="margin-top: 8px;">
-              <div class="quota-row-header">
                 <span>Weekly Limit:</span>
-                <b>${cWeekly.percent}%</b>
+                <b>${cWeeklyExhausted ? '<span style="color:var(--red);">Exhausted (≤5%)</span>' : Number(cWeekly.percent).toFixed(2) + '%'}</b>
               </div>
               <div class="bar-bg">
                 <div class="bar-fill" style="width: ${cWeekly.percent}%; background: ${getBarColor(cWeekly.percent, 'var(--purple)')}"></div>
               </div>
               <div class="reset-label">${formatTimeUntil(cWeekly.reset_time)}</div>
             </div>
+            <div class="quota-row" style="margin-top: 8px;">
+              <div class="quota-row-header">
+                <span>Five Hour Limit:</span>
+                <b>${cWeeklyExhausted ? '<span style="color:var(--red);">0% (Weekly Limit)</span>' : (c5h.percent <= 5.0 && c5h.reset_time ? '<span style="color:var(--red);">Exhausted (≤5%)</span>' : Number(c5hEffectivePct).toFixed(2) + '%')}</b>
+              </div>
+              <div class="bar-bg">
+                <div class="bar-fill" style="width: ${c5hEffectivePct}%; background: ${getBarColor(c5hEffectivePct, 'var(--purple)')}"></div>
+              </div>
+              <div class="reset-label">${cWeeklyExhausted ? 'Blocked by weekly limit' : formatTimeUntil(c5h.reset_time)}</div>
+            </div>
           </div>
 
           <div class="meta-row">
             <span>Exp: <b>${acc.token_expires_in_min}m</b></span>
-            <span>OAuth: <b>${acc.has_refresh_token ? '✓ Connected' : '✗ Missing'}</b></span>
+            <span>OAuth: <b style="color: ${acc.has_refresh_token ? 'var(--green)' : 'var(--red)'};">${acc.has_refresh_token ? 'Connected' : 'Missing'}</b></span>
             <div style="display: flex; gap: 6px;">
-              <button onclick="warmupSingle('${name}', this)" class="warmup" style="padding: 3px 8px; font-size: 0.72rem;" title="Trigger 5h window for this account">
-                <svg class="btn-svg" style="width:12px; height:12px;" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
-                <span>Trigger</span>
+              <button onclick="warmupSingle('${name}', this)" class="card-btn" title="Trigger 5H Window for ${name}">
+                <svg class="btn-svg" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
+                <span>Warmup</span>
               </button>
-              <button onclick="refreshSingle('${name}', this)" style="padding: 3px 8px; font-size: 0.72rem;">
-                <svg class="btn-svg" style="width:12px; height:12px;" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              <button onclick="refreshSingle('${name}', this)" class="card-btn" title="Refresh Token for ${name}">
+                <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 <span>Refresh</span>
               </button>
             </div>
@@ -848,31 +918,44 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     async function refreshAllTokens(btn) {
       await handleActionWithButton(btn, async () => {
-        await fetch('/api/refresh-all', { method: 'POST' });
-        await fetchStatus();
+        try {
+          const res = await fetch('/api/refresh-all', { method: 'POST' });
+          const data = await res.json();
+          showToast('OAuth tokens refreshed successfully', 'success');
+          await fetchStatus();
+        } catch (e) {
+          showToast(`Refresh error: ${e.message}`, 'error');
+        }
       });
     }
 
     async function syncAllQuotas(btn) {
       await handleActionWithButton(btn, async () => {
-        await fetch('/api/sync-quotas', { method: 'POST' });
-        await fetchStatus();
+        try {
+          const res = await fetch('/api/sync-quotas', { method: 'POST' });
+          const data = await res.json();
+          showToast('Quotas synced from Google successfully', 'success');
+          await fetchStatus();
+        } catch (e) {
+          showToast(`Sync error: ${e.message}`, 'error');
+        }
       });
     }
 
     async function refreshSingle(name, btn) {
       await handleActionWithButton(btn, async () => {
-        await fetch(`/api/accounts/${name}/refresh`, { method: 'POST' });
-        await fetchStatus();
+        try {
+          const res = await fetch(`/api/accounts/${name}/refresh`, { method: 'POST' });
+          const data = await res.json();
+          showToast(`${name}: ${data.message || 'Refreshed'}`, data.success ? 'success' : 'error');
+          await fetchStatus();
+        } catch (e) {
+          showToast(`${name} refresh error: ${e.message}`, 'error');
+        }
       });
     }
 
-    async function sendTestRequest(btn) {
-      await handleActionWithButton(btn, async () => {
-        await fetch('/api/test-request', { method: 'POST' });
-        await pollLogs();
-      });
-    }
+
 
     async function pollLogs() {
       try {
@@ -892,6 +975,49 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       } catch (e) {
         console.error("Polling logs error:", e);
       }
+    }
+
+    let currentModalActiveTab = 'request';
+    let currentModalEvt = null;
+
+    function switchModalTab(tab) {
+      currentModalActiveTab = tab;
+      document.querySelectorAll('.modal-tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.modal-tab-content').forEach(c => c.style.display = 'none');
+
+      if (tab === 'request') {
+        document.getElementById('tabBtnReq').classList.add('active');
+        document.getElementById('modalTabRequest').style.display = 'block';
+      } else if (tab === 'response') {
+        document.getElementById('tabBtnResp').classList.add('active');
+        document.getElementById('modalTabResponse').style.display = 'block';
+      } else if (tab === 'tokens') {
+        document.getElementById('tabBtnRaw').classList.add('active');
+        document.getElementById('modalTabTokens').style.display = 'block';
+      }
+    }
+
+    function copyCurrentModalContent(btn) {
+      if (!currentModalEvt) return;
+      let textToCopy = "";
+      if (currentModalActiveTab === 'request') {
+        textToCopy = currentModalEvt.body || "";
+      } else if (currentModalActiveTab === 'response') {
+        textToCopy = currentModalEvt.response_preview || "";
+      } else {
+        textToCopy = JSON.stringify({
+          inbound_token: currentModalEvt.inbound_token,
+          overridden_token: currentModalEvt.overridden_token,
+          account: currentModalEvt.account,
+          status: currentModalEvt.status,
+          latency_ms: currentModalEvt.latency_ms
+        }, null, 2);
+      }
+      navigator.clipboard.writeText(textToCopy);
+      const span = btn.querySelector('span');
+      const oldText = span.innerText;
+      span.innerText = "Copied!";
+      setTimeout(() => { span.innerText = oldText; }, 1500);
     }
 
     function appendLogRow(evt, isNew = true) {
@@ -914,23 +1040,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const methodClass = (evt.method || 'GET').toLowerCase();
       const bodySize = evt.body_size !== undefined ? evt.body_size : (evt.body ? evt.body.length : 0);
       const sizeLabel = bodySize > 1024 ? `${(bodySize/1024).toFixed(1)} KB` : `${bodySize} B`;
+      const modelLabel = evt.model || 'API Request';
 
       row.innerHTML = `
         <td style="color:var(--text-muted); font-size:0.75rem;">${evt.time}</td>
         <td><span class="pill ${methodClass}">${evt.method}</span></td>
-        <td><span class="code-chip" title="${evt.path}">${evt.path.length > 32 ? evt.path.substring(0,32)+'...' : evt.path}</span></td>
-        <td><b style="color:var(--accent);">${evt.account}</b></td>
-        <td>
-          <span style="color:var(--text-muted); font-size:0.74rem;">AGY:</span> <span class="code-chip">${evt.inbound_token}</span>
-          <span style="color:var(--accent); margin:0 2px;">➔</span>
-          <span style="color:var(--accent); font-size:0.74rem;">Google:</span> <span class="code-chip">${evt.overridden_token}</span>
-        </td>
+        <td><span class="code-chip" style="color:var(--accent); font-weight:600;">${modelLabel}</span></td>
+        <td><span class="code-chip" title="${evt.path}">${evt.path.length > 28 ? evt.path.substring(0,28)+'...' : evt.path}</span></td>
+        <td><b style="color:#fff;">${evt.account}</b></td>
         <td><b style="color: ${statusColor};">${evt.status_text || evt.status}</b></td>
         <td style="color:var(--text-muted);">${evt.latency_ms}ms</td>
         <td>
           <button class="btn-inspect" onclick="openPayloadModal('${evt.id}')">
             <svg class="btn-svg" style="width:13px; height:13px;" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            <span>Payload (${sizeLabel})</span>
+            <span>Telemetry (${sizeLabel})</span>
           </button>
         </td>
       `;
@@ -946,10 +1069,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     function openPayloadModal(id) {
       const evt = logDataMap.get(id);
       if (!evt) return;
+      currentModalEvt = evt;
 
       document.getElementById('modalTitle').innerHTML = `
         <span class="pill ${(evt.method||'POST').toLowerCase()}">${evt.method}</span>
-        <span>${evt.path}</span>
+        <span style="color:var(--accent);">${evt.model || 'API'}</span> &bull;
+        <span style="color:var(--text-muted); font-size:0.85rem;">${evt.path}</span>
       `;
       let statusColor = evt.status >= 400 ? 'var(--red)' : 'var(--green)';
       if (evt.status === 429) statusColor = 'var(--yellow)';
@@ -959,36 +1084,41 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         Latency: <b>${evt.latency_ms}ms</b> &bull; Time: <b>${evt.time}</b>
       `;
       document.getElementById('modalHeaderFlow').innerHTML = `
-        <span style="color:var(--text-muted);">Inbound Client Token:</span> <span class="code-chip">${evt.inbound_token}</span>
-        <span style="color:var(--accent); margin:0 4px;">➔</span>
-        <span style="color:var(--accent);">Overridden Pool Token:</span> <span class="code-chip">${evt.overridden_token}</span>
+        <div style="margin-bottom:6px;"><span style="color:var(--text-muted);">Inbound Client Token:</span> <span class="code-chip">${evt.inbound_token}</span></div>
+        <div style="margin-bottom:6px;"><span style="color:var(--accent);">➔ Routed Account:</span> <b style="color:#fff;">${evt.account}</b></div>
+        <div><span style="color:var(--accent);">➔ Google OAuth Token:</span> <span class="code-chip">${evt.overridden_token}</span></div>
       `;
 
-      currentModalRawBody = evt.body || "";
-      let highlightedHtml = '<span class="json-null">(empty body)</span>';
+      // Tab 1: Request
+      let reqHtml = '<span class="json-null">(empty body)</span>';
       if (evt.body) {
         try {
           const parsed = JSON.parse(evt.body);
-          highlightedHtml = syntaxHighlightJson(parsed);
+          reqHtml = syntaxHighlightJson(parsed);
         } catch (e) {
-          highlightedHtml = `<span class="json-string">${evt.body}</span>`;
+          reqHtml = `<span class="json-string">${evt.body}</span>`;
         }
       }
-      document.getElementById('modalJsonContainer').innerHTML = highlightedHtml;
+      document.getElementById('modalJsonContainer').innerHTML = reqHtml;
+
+      // Tab 2: Response Output
+      let respHtml = '<span class="json-null">(no response preview captured)</span>';
+      if (evt.response_preview) {
+        try {
+          const parsed = JSON.parse(evt.response_preview);
+          respHtml = syntaxHighlightJson(parsed);
+        } catch (e) {
+          respHtml = `<span class="json-string">${evt.response_preview}</span>`;
+        }
+      }
+      document.getElementById('modalRespContainer').innerHTML = respHtml;
+
+      switchModalTab('request');
       document.getElementById('payloadModal').classList.add('active');
     }
 
     function closeModal() {
       document.getElementById('payloadModal').classList.remove('active');
-    }
-
-    function copyModalPayload(btn) {
-      if (!currentModalRawBody) return;
-      navigator.clipboard.writeText(currentModalRawBody);
-      const span = btn.querySelector('span');
-      const oldText = span.innerText;
-      span.innerText = "Copied!";
-      setTimeout(() => { span.innerText = oldText; }, 1500);
     }
 
     document.addEventListener('keydown', (e) => {

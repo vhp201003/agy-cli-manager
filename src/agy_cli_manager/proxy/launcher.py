@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import threading
 import time
@@ -41,15 +42,24 @@ def run_proxy_service(
     print(f"[*] Discovered Accounts    : {accounts}")
     print(f"[*] Auto-Refresh Cron      : Active (proactive check every 15 mins)")
     print("-" * 68)
-    print("To hook AGY CLI in another terminal, run:")
-    print(f'  $env:HTTPS_PROXY   = "http://{proxy_host}:{proxy_port}"')
-    print(f'  $env:HTTP_PROXY    = "http://{proxy_host}:{proxy_port}"')
-    print(f'  $env:SSL_CERT_FILE = "{bundle_path}"')
-    print("  agy")
+    print("Quick 1-Command Hook (auto-injects proxy & CA cert):")
+    print("  agy-run")
+    print("\nOr manually export in another terminal:")
+    if os.name == "nt":
+        print(f'  $env:HTTPS_PROXY   = "http://{proxy_host}:{proxy_port}"')
+        print(f'  $env:HTTP_PROXY    = "http://{proxy_host}:{proxy_port}"')
+        print(f'  $env:SSL_CERT_FILE = "{bundle_path}"')
+        print("  agy")
+    else:
+        print(f'  export HTTPS_PROXY="http://{proxy_host}:{proxy_port}"')
+        print(f'  export HTTP_PROXY="http://{proxy_host}:{proxy_port}"')
+        print(f'  export SSL_CERT_FILE="{bundle_path}"')
+        print("  agy")
     print("=" * 68)
 
-    # Start Proxy Server in background thread
-    server, proxy_thr = start_proxy_server(port=proxy_port)
+    # Start Proxy Server in background thread sharing the same TokenManager as FastAPI
+    from agy_cli_manager.proxy.fastapi_app import tm_instance
+    server, proxy_thr = start_proxy_server(port=proxy_port, token_manager=tm_instance, cert_manager=cm)
 
     if open_browser:
         import webbrowser
@@ -68,7 +78,12 @@ def run_proxy_service(
     except KeyboardInterrupt:
         pass
     finally:
-        print("\nShutting down Proxy server...")
-        server.shutdown()
-        server.server_close()
+        print("\nShutting down Proxy servers...")
+        if isinstance(server, list):
+            for s in server:
+                s.shutdown()
+                s.server_close()
+        else:
+            server.shutdown()
+            server.server_close()
         print("Done.")

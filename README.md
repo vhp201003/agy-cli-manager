@@ -146,13 +146,12 @@ pip install ".[proxy]"
 agy-cli-manager proxy
 ```
 
-Then in your working terminal:
+Then in your working terminal, run:
 ```powershell
-$env:HTTPS_PROXY   = "http://127.0.0.1:8899"
-$env:HTTP_PROXY    = "http://127.0.0.1:8899"
-$env:SSL_CERT_FILE = "$HOME\.agy-cli-manager\certs\bundle.crt"
-agy
+agy-run
+# or: agy-cli-manager run
 ```
+*(Automatically hooks proxy if active and configures SSL cert, or safely falls back to native `agy` if proxy is offline).*
 
 Features included:
 - **Round-robin request routing** across discovered Windows Credential Manager accounts (`gemini:antigravity:acc*`)
