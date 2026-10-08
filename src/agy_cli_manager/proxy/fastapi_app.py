@@ -116,14 +116,48 @@ async def get_status():
     status = tm_instance.get_status()
     total_accs = len(status)
     active_accs = sum(1 for a in status.values() if a["is_active"])
+
+    # Aggregate telemetry metrics across intercepted logs
+    logs = list(REQUEST_LOGS)
+    total_reqs = len(logs)
+    failovers = sum(1 for r in logs if r.get("retried") or r.get("status") == 429)
+    success_reqs = sum(1 for r in logs if r.get("status") and r.get("status") < 400)
+    success_rate = round((success_reqs / total_reqs * 100), 1) if total_reqs > 0 else 100.0
+
+    total_tokens = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    latencies = []
+
+    for r in logs:
+        t = r.get("tokens")
+        if t and isinstance(t, dict):
+            total_tokens += t.get("total", 0)
+            prompt_tokens += t.get("prompt", 0)
+            completion_tokens += t.get("completion", 0)
+        lat = r.get("latency_ms")
+        if lat is not None:
+            latencies.append(lat)
+
+    avg_latency = round(sum(latencies) / len(latencies), 0) if latencies else 0
+
     return {
         "pool_size": total_accs,
         "available_accounts": active_accs,
         "proxy_port": 8899,
         "accounts": status,
-        "total_requests_intercepted": len(REQUEST_LOGS),
+        "total_requests_intercepted": total_reqs,
+        "failover_count": failovers,
+        "success_rate": success_rate,
+        "tokens": {
+            "total": total_tokens,
+            "prompt": prompt_tokens,
+            "completion": completion_tokens,
+        },
+        "avg_latency_ms": int(avg_latency),
         "timestamp": time.time(),
     }
+
 
 
 @app.get("/api/logs")
@@ -192,6 +226,270 @@ async def stream_logs(request: Request):
                 active_subscribers.remove(q)
 
     return EventSourceResponse(event_generator())
+
+from agy_cli_manager.proxy.translators.openai import convert_openai_messages_to_gemini, convert_openai_tools_to_gemini, convert_gemini_response_to_openai, convert_gemini_error_to_openai
+from agy_cli_manager.proxy.translators.streaming import stream_gemini_to_openai
+import httpx
+from agy_cli_manager.proxy.proxy_server import broadcast_event, _extract_usage_metadata, _format_body_for_log
+import uuid
+
+_MODEL_MAP = {
+    "gemini-1.5-pro-latest": "gemini-2.5-flash",
+    "gemini-1.5-pro": "gemini-2.5-flash",
+    "gemini-1.5-flash-latest": "gemini-2.5-flash",
+    "gemini-1.5-flash": "gemini-2.5-flash",
+    "gemini-1.0-pro": "gemini-2.5-flash",
+    "gemini-pro": "gemini-2.5-flash",
+    "gemini-pro-latest": "gemini-2.5-flash",
+}
+
+_CLOUDCODE_HOST = "daily-cloudcode-pa.googleapis.com"
+_CLOUDCODE_PROJECT = "aicode-consumers"
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        
+    model_name = body.get("model", "gemini-2.5-flash")
+    if not model_name.startswith("gemini"):
+        model_name = "gemini-2.5-flash"
+    model_name = _MODEL_MAP.get(model_name, model_name).replace("-latest", "")
+        
+    contents, system_instruction = convert_openai_messages_to_gemini(body.get("messages", []))
+    gemini_payload = {"contents": contents}
+    if system_instruction:
+        gemini_payload["systemInstruction"] = system_instruction
+        
+    if "temperature" in body:
+        gemini_payload.setdefault("generationConfig", {})["temperature"] = body["temperature"]
+    if "max_tokens" in body:
+        gemini_payload.setdefault("generationConfig", {})["maxOutputTokens"] = body["max_tokens"]
+    if "top_p" in body:
+        gemini_payload.setdefault("generationConfig", {})["topP"] = body["top_p"]
+    
+    if body.get("tools"):
+        gemini_tools, tool_config = convert_openai_tools_to_gemini(body["tools"], body.get("tool_choice"))
+        if gemini_tools:
+            gemini_payload["tools"] = gemini_tools
+        if tool_config:
+            gemini_payload["toolConfig"] = tool_config
+        
+    is_stream = body.get("stream", False)
+    max_attempts = 4
+    session_key = request.headers.get("x-session-id", str(uuid.uuid4()))
+    
+    last_error_resp = None
+    last_status_code = 502
+    
+    path = "/v1internal:streamGenerateContent?alt=sse" if is_stream else "/v1internal:streamGenerateContent"
+    url = f"https://{_CLOUDCODE_HOST}{path}"
+    cloudcode_payload = {"project": _CLOUDCODE_PROJECT, "model": model_name, "request": gemini_payload}
+
+    if not is_stream:
+        async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
+            for attempt in range(max_attempts):
+                acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=model_name)
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "antigravity",
+                }
+                req = client.build_request("POST", url, json=cloudcode_payload, headers=headers)
+                t0 = time.time()
+                try:
+                    resp = await client.send(req, stream=False)
+                except Exception as e:
+                    logger.error(f"Error calling Gemini: {e}")
+                    return JSONResponse({"error": {"message": str(e), "type": "api_error", "param": None, "code": "502"}}, status_code=502)
+
+                if resp.status_code >= 400:
+                    resp_bytes = await resp.aread()
+                    try:
+                        err_data = json.loads(resp_bytes)
+                        if isinstance(err_data, list) and err_data:
+                            err_data = err_data[0]
+                        last_error_resp = convert_gemini_error_to_openai(err_data)
+                    except Exception:
+                        last_error_resp = {"error": {"message": f"Upstream error {resp.status_code}", "type": "api_error", "param": None, "code": str(resp.status_code)}}
+                    last_status_code = resp.status_code
+
+                    if resp.status_code == 401 and attempt < max_attempts - 1:
+                        tm_instance.refresh_account_token(acc_name)
+                        await resp.aclose()
+                        continue
+                    if resp.status_code == 429 and attempt < max_attempts - 1:
+                        tm_instance.mark_429(acc_name, cooldown_seconds=600)
+                        await resp.aclose()
+                        continue
+                    if resp.status_code == 403 and attempt < max_attempts - 1:
+                        tm_instance.mark_429(acc_name, cooldown_seconds=1800)
+                        await resp.aclose()
+                        continue
+
+                    await resp.aclose()
+                    return JSONResponse(last_error_resp, status_code=last_status_code)
+
+                try:
+                    resp_bytes = await resp.aread()
+                    gemini_resp_array = json.loads(resp_bytes)
+
+                    combined_parts: list = []
+                    usage = {}
+                    finish_reason = "STOP"
+                    if isinstance(gemini_resp_array, list):
+                        for item in gemini_resp_array:
+                            resp_obj = item.get("response", {})
+                            for cand in resp_obj.get("candidates", []):
+                                for part in cand.get("content", {}).get("parts", []):
+                                    if part.get("thought"):
+                                        continue
+                                    if "functionCall" in part or ("text" in part and part["text"]):
+                                        combined_parts.append(part)
+                                if "finishReason" in cand:
+                                    finish_reason = cand["finishReason"]
+                            if "usageMetadata" in resp_obj:
+                                usage = resp_obj["usageMetadata"]
+                    else:
+                        combined_parts = gemini_resp_array.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+
+                    gemini_resp = {
+                        "candidates": [{"content": {"parts": combined_parts or [{"text": ""}]}, "finishReason": finish_reason}],
+                        "usageMetadata": usage,
+                    }
+                    openai_resp = convert_gemini_response_to_openai(gemini_resp, model_name)
+                except Exception as e:
+                    await resp.aclose()
+                    return JSONResponse({"error": "Failed to parse Gemini response"}, status_code=502)
+
+                token_usage = _extract_usage_metadata(resp_bytes, resp_bytes.decode("utf-8", "ignore"))
+                broadcast_event({
+                    "id": str(uuid.uuid4())[:8],
+                    "time": time.strftime("%H:%M:%S"),
+                    "method": "POST",
+                    "path": path,
+                    "host": _CLOUDCODE_HOST,
+                    "account": acc_name,
+                    "model": model_name,
+                    "inbound_token": "OpenAI-Mapped",
+                    "overridden_token": f"Bearer {access_token[:10]}...{access_token[-5:]}",
+                    "status": resp.status_code,
+                    "status_text": f"{resp.status_code} {resp.reason_phrase}",
+                    "latency_ms": round((time.time() - t0) * 1000, 1),
+                    "body": json.dumps(gemini_payload),
+                    "body_size": len(json.dumps(gemini_payload)),
+                    "response_preview": _format_body_for_log(resp_bytes, {}),
+                    "response_size": len(resp_bytes),
+                    "tokens": token_usage,
+                    "retried": attempt > 0,
+                })
+                await resp.aclose()
+                return JSONResponse(openai_resp)
+
+        return JSONResponse({"error": "Failed after retries"}, status_code=502)
+
+    # --- Streaming path: client lifetime managed inside the generator ---
+    stream_acc_name = None
+    stream_token = None
+    stream_resp = None
+    stream_client = None
+
+    for attempt in range(max_attempts):
+        stream_client = httpx.AsyncClient(timeout=180.0, trust_env=False)
+        acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=model_name)
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": "antigravity",
+        }
+        req = stream_client.build_request("POST", url, json=cloudcode_payload, headers=headers)
+        try:
+            resp = await stream_client.send(req, stream=True)
+        except Exception as e:
+            await stream_client.aclose()
+            logger.error(f"Error calling Gemini (stream): {e}")
+            return JSONResponse({"error": {"message": str(e), "type": "api_error", "param": None, "code": "502"}}, status_code=502)
+
+        if resp.status_code >= 400:
+            resp_bytes = await resp.aread()
+            try:
+                err_data = json.loads(resp_bytes)
+                if isinstance(err_data, list) and err_data:
+                    err_data = err_data[0]
+                last_error_resp = convert_gemini_error_to_openai(err_data)
+            except Exception:
+                last_error_resp = {"error": {"message": f"Upstream error {resp.status_code}", "type": "api_error", "param": None, "code": str(resp.status_code)}}
+            last_status_code = resp.status_code
+            await resp.aclose()
+            await stream_client.aclose()
+
+            if resp.status_code == 401 and attempt < max_attempts - 1:
+                tm_instance.refresh_account_token(acc_name)
+                continue
+            if resp.status_code == 429 and attempt < max_attempts - 1:
+                tm_instance.mark_429(acc_name, cooldown_seconds=600)
+                continue
+            if resp.status_code == 403 and attempt < max_attempts - 1:
+                tm_instance.mark_429(acc_name, cooldown_seconds=1800)
+                continue
+            return JSONResponse(last_error_resp, status_code=last_status_code)
+
+        stream_acc_name, stream_token, stream_resp, stream_client_ref = acc_name, access_token, resp, stream_client
+        break
+    else:
+        if stream_client:
+            await stream_client.aclose()
+        return JSONResponse({"error": "Failed after retries"}, status_code=502)
+
+    _client_ref = stream_client_ref
+    _resp_ref = stream_resp
+    _acc_ref = stream_acc_name
+    _token_ref = stream_token
+
+    async def generator():
+        t0 = time.time()
+        full_gemini_response = bytearray()
+
+        async def tee_stream():
+            async for chunk in _resp_ref.aiter_bytes():
+                full_gemini_response.extend(chunk)
+                yield chunk
+
+        try:
+            async for openai_chunk in stream_gemini_to_openai(tee_stream()):
+                yield openai_chunk
+        finally:
+            latency_ms = round((time.time() - t0) * 1000, 1)
+            await _resp_ref.aclose()
+            await _client_ref.aclose()
+
+            token_usage = _extract_usage_metadata(bytes(full_gemini_response), bytes(full_gemini_response).decode("utf-8", "ignore"))
+            broadcast_event({
+                "id": str(uuid.uuid4())[:8],
+                "time": time.strftime("%H:%M:%S"),
+                "method": "POST",
+                "path": path,
+                "host": _CLOUDCODE_HOST,
+                "account": _acc_ref,
+                "model": model_name,
+                "inbound_token": "OpenAI-Mapped",
+                "overridden_token": f"Bearer {_token_ref[:10]}...{_token_ref[-5:]}",
+                "status": _resp_ref.status_code,
+                "status_text": f"{_resp_ref.status_code} {_resp_ref.reason_phrase}",
+                "latency_ms": latency_ms,
+                "body": json.dumps(gemini_payload),
+                "body_size": len(json.dumps(gemini_payload)),
+                "response_preview": _format_body_for_log(bytes(full_gemini_response), {}),
+                "response_size": len(full_gemini_response),
+                "tokens": token_usage,
+                "retried": False,
+            })
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(generator(), media_type="text/event-stream")
+
 
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -543,19 +841,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="actions">
       <!-- Trigger 5H Quota Button -->
-      <button onclick="warmupAllAccounts(this)" id="btnWarmup" title="Trigger 5H Window on all accounts">
+      <button onclick="warmupAllAccounts(this)" id="btnWarmup" title="Activate 5H window on all accounts">
         <svg class="btn-svg" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
-        <span>Warmup All</span>
+        <span>Activate All</span>
       </button>
 
       <!-- Sync Quotas Button -->
-      <button onclick="syncAllQuotas(this)" class="primary" id="btnSyncQuotas" title="Sync live quotas from Google">
+      <button onclick="syncAllQuotas(this)" class="primary" id="btnSyncQuotas" title="Update quotas from Google">
         <svg class="btn-svg" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-        <span>Sync Quotas</span>
+        <span>Update Quotas</span>
       </button>
 
       <!-- Refresh Tokens Button -->
-      <button onclick="refreshAllTokens(this)" id="btnRefreshTokens" title="Refresh Google OAuth tokens">
+      <button onclick="refreshAllTokens(this)" id="btnRefreshTokens" title="Refresh Google tokens">
         <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         <span>Refresh Tokens</span>
       </button>
@@ -568,27 +866,34 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- KPI Strip -->
+  <!-- KPI Strip - Modern Operational Metrics -->
   <div class="kpi-strip">
+    <!-- Card 1: Pool Readiness -->
     <div class="kpi-card">
-      <div class="kpi-label">Active Pool <span style="color:var(--green)">●</span></div>
-      <div class="kpi-value" id="kpiPoolReady">4 / 4</div>
-      <div class="kpi-sub">Ready for LLM routing</div>
+      <div class="kpi-label">Accounts Ready <span style="color:var(--green)">●</span></div>
+      <div class="kpi-value" id="kpiPoolReady">-- / --</div>
+      <div class="kpi-sub" id="kpiPoolSub">Loading...</div>
     </div>
+
+    <!-- Card 2: Total Token Burn -->
     <div class="kpi-card">
-      <div class="kpi-label">Gemini Capacity <span style="color:var(--accent)">●</span></div>
-      <div class="kpi-value" id="kpiGeminiAvg" style="color:var(--accent);">-- %</div>
-      <div class="kpi-sub">5h pool average capacity</div>
+      <div class="kpi-label">Tokens Used <span style="color:var(--accent)">●</span></div>
+      <div class="kpi-value" id="kpiTokenBurn" style="color:var(--accent);">0</div>
+      <div class="kpi-sub" id="kpiTokenSub">Input: 0 · Output: 0</div>
     </div>
+
+    <!-- Card 3: Failover Resilience -->
     <div class="kpi-card">
-      <div class="kpi-label">Claude Capacity <span style="color:var(--purple)">●</span></div>
-      <div class="kpi-value" id="kpiClaudeAvg" style="color:var(--purple);">-- %</div>
-      <div class="kpi-sub">5h pool average capacity</div>
+      <div class="kpi-label">Stability <span style="color:var(--purple)">●</span></div>
+      <div class="kpi-value" id="kpiResilience" style="color:var(--purple);">100%</div>
+      <div class="kpi-sub" id="kpiResilienceSub">0 failovers · 0 errors</div>
     </div>
+
+    <!-- Card 4: Traffic & Latency -->
     <div class="kpi-card">
-      <div class="kpi-label">Intercepted Traffic <span style="color:var(--text-muted)">●</span></div>
-      <div class="kpi-value" id="kpiTotalReqs">0</div>
-      <div class="kpi-sub" id="kpiSyncStatus">SSE Connected</div>
+      <div class="kpi-label">Traffic & Latency <span style="color:var(--text-muted)">●</span></div>
+      <div class="kpi-value" id="kpiTrafficSpeed">0 <span style="font-size:0.85rem; font-weight:400; color:var(--text-muted);">reqs</span></div>
+      <div class="kpi-sub" id="kpiSyncStatus">-- ms avg</div>
     </div>
   </div>
 
@@ -596,7 +901,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="section-header">
     <div class="section-title">
       <svg class="btn-svg" viewBox="0 0 24 24" style="color:var(--accent);"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-      <span>Routing Pool Accounts</span>
+      <span>Accounts</span>
     </div>
     <div class="section-controls">
       <!-- Filter Tabs -->
@@ -655,8 +960,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="filter-group">
         <span style="font-size:0.75rem; color:var(--text-muted); font-weight:700; margin-right:4px;">FILTER:</span>
         <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
-        <button class="filter-btn" onclick="setFilter('stream', this)">Streaming (SSE)</button>
-        <button class="filter-btn" onclick="setFilter('quota', this)">429 Failover</button>
+        <button class="filter-btn" onclick="setFilter('stream', this)">Streaming</button>
+        <button class="filter-btn" onclick="setFilter('quota', this)">Quota Hit (429)</button>
         <button class="filter-btn" onclick="setFilter('errors', this)">Errors</button>
       </div>
       <div>
@@ -675,7 +980,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <th>Account</th>
             <th>Status</th>
             <th>Latency</th>
-            <th>Telemetry</th>
+            <th>Details</th>
           </tr>
         </thead>
         <tbody id="logBody">
@@ -707,13 +1012,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="modal-tab-bar">
           <button class="modal-tab-btn active" id="tabBtnReq" onclick="switchModalTab('request')">Request Payload</button>
           <button class="modal-tab-btn" id="tabBtnResp" onclick="switchModalTab('response')">Response Output</button>
-          <button class="modal-tab-btn" id="tabBtnRaw" onclick="switchModalTab('tokens')">Token Override Flow</button>
+          <button class="modal-tab-btn" id="tabBtnRaw" onclick="switchModalTab('tokens')">Token Flow</button>
         </div>
 
         <!-- Tab 1: Request -->
         <div id="modalTabRequest" class="modal-tab-content">
           <div style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:700; font-family:var(--font-mono); margin-bottom:6px;">
-            Inbound Request Body / Prompts:
+            Request Body:
           </div>
           <div class="json-container" id="modalJsonContainer"></div>
         </div>
@@ -721,7 +1026,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <!-- Tab 2: Response -->
         <div id="modalTabResponse" class="modal-tab-content" style="display:none;">
           <div style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:700; font-family:var(--font-mono); margin-bottom:6px;">
-            Upstream Response Output / Stream Preview:
+            Response:
           </div>
           <div class="json-container" id="modalRespContainer"></div>
         </div>
@@ -729,7 +1034,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <!-- Tab 3: Tokens Override -->
         <div id="modalTabTokens" class="modal-tab-content" style="display:none;">
           <div style="font-size:0.72rem; text-transform:uppercase; color:var(--text-muted); font-weight:700; font-family:var(--font-mono); margin-bottom:6px;">
-            OAuth Token Injection Flow:
+            Token Flow:
           </div>
           <div style="font-size:0.8rem; background:rgba(255,255,255,0.03); padding:12px 14px; border-radius:8px; border:1px solid var(--border); font-family:var(--font-mono);" id="modalHeaderFlow"></div>
         </div>
@@ -863,32 +1168,53 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       else await doFetch();
     }
 
+    function formatTokenCount(num) {
+      if (!num || num <= 0) return '0';
+      if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+      if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
+      return num.toLocaleString();
+    }
+
     function updateKPIs(data) {
       const accs = Object.values(data.accounts || {});
       const total = accs.length;
-      const ready = accs.filter(a => a.is_active).length;
-      document.getElementById('kpiPoolReady').innerText = `${ready} / ${total}`;
+      
+      let healthyCount = 0;
+      let partialCount = 0;
+      let depletedCount = 0;
 
-      let gemTotal = 0, claudeTotal = 0, count = 0;
       accs.forEach(a => {
         const q = a.quota || {};
-        const g5h = (q.gemini && q.gemini['5h']) || { percent: 100 };
         const gW = (q.gemini && q.gemini['weekly']) || { percent: 100 };
-        const c5h = (q.third_party && q.third_party['5h']) || { percent: 100 };
         const cW = (q.third_party && q.third_party['weekly']) || { percent: 100 };
-
         const gExhausted = gW.disabled || (gW.percent <= 5.0 && Boolean(gW.reset_time));
         const cExhausted = cW.disabled || (cW.percent <= 5.0 && Boolean(cW.reset_time));
 
-        gemTotal += gExhausted ? 0 : g5h.percent;
-        claudeTotal += cExhausted ? 0 : c5h.percent;
-        count++;
+        if (!gExhausted && !cExhausted && a.is_active) healthyCount++;
+        else if (gExhausted && cExhausted) depletedCount++;
+        else partialCount++;
       });
-      if (count > 0) {
-        document.getElementById('kpiGeminiAvg').innerText = `${(gemTotal / count).toFixed(2)}%`;
-        document.getElementById('kpiClaudeAvg').innerText = `${(claudeTotal / count).toFixed(2)}%`;
-      }
-      document.getElementById('kpiTotalReqs').innerText = data.total_requests_intercepted || renderedIds.size;
+
+      // 1. Pool Readiness
+      document.getElementById('kpiPoolReady').innerText = `${healthyCount} / ${total} Ready`;
+      document.getElementById('kpiPoolSub').innerText = `${partialCount} partial · ${depletedCount} depleted`;
+
+      // 2. Token Burn
+      const tok = data.tokens || { total: 0, prompt: 0, completion: 0 };
+      document.getElementById('kpiTokenBurn').innerText = formatTokenCount(tok.total);
+      document.getElementById('kpiTokenSub').innerText = `Input: ${formatTokenCount(tok.prompt)} · Output: ${formatTokenCount(tok.completion)}`;
+
+      // 3. Router Resilience
+      const succRate = data.success_rate !== undefined ? data.success_rate : 100;
+      const failovers = data.failover_count || 0;
+      document.getElementById('kpiResilience').innerText = `${succRate}%`;
+      document.getElementById('kpiResilienceSub').innerText = `${failovers} auto-switches · 0 dropped`;
+
+      // 4. Traffic & Latency
+      const totalReqs = data.total_requests_intercepted || renderedIds.size;
+      const avgLat = data.avg_latency_ms || 0;
+      document.getElementById('kpiTrafficSpeed').innerHTML = `${totalReqs} <span style="font-size:0.85rem; font-weight:400; color:var(--text-muted);">reqs</span>`;
+      document.getElementById('kpiSyncStatus').innerText = avgLat > 0 ? `${avgLat}ms avg · Real-time SSE` : 'Live Connected';
     }
 
     function calculateAccountMeta(name, acc) {
@@ -1074,9 +1400,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="meta-row">
             <span>Exp: <b>${acc.token_expires_in_min}m</b></span>
             <div style="display:flex; gap:6px;">
-              <button onclick="warmupSingle('${name}', this)" class="card-btn" title="Trigger 5H Window for ${name}">
+              <button onclick="warmupSingle('${name}', this)" class="card-btn" title="Activate 5H for ${name}">
                 <svg class="btn-svg" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
-                <span>Warmup</span>
+                <span>Activate</span>
               </button>
               <button onclick="refreshSingle('${name}', this)" class="card-btn" title="Refresh Token for ${name}">
                 <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -1174,7 +1500,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           showToast(`Trigger 5h window: ${successes}/${total} accounts activated`, successes > 0 ? 'success' : 'error');
           await fetchStatus();
         } catch (e) {
-          showToast(`Warmup error: ${e.message}`, 'error');
+          showToast(`Activation error: ${e.message}`, 'error');
         }
       });
     }
@@ -1197,7 +1523,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         try {
           const res = await fetch('/api/refresh-all', { method: 'POST' });
           const data = await res.json();
-          showToast('OAuth tokens refreshed successfully', 'success');
+          showToast('Tokens refreshed successfully', 'success');
           await fetchStatus();
         } catch (e) {
           showToast(`Refresh error: ${e.message}`, 'error');
@@ -1210,7 +1536,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         try {
           const res = await fetch('/api/sync-quotas', { method: 'POST' });
           const data = await res.json();
-          showToast('Quotas synced from Google successfully', 'success');
+          showToast('Quotas updated successfully', 'success');
           await fetchStatus();
         } catch (e) {
           showToast(`Sync error: ${e.message}`, 'error');
@@ -1318,6 +1644,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const sizeLabel = bodySize > 1024 ? `${(bodySize/1024).toFixed(1)} KB` : `${bodySize} B`;
       const modelLabel = evt.model || 'API Request';
 
+      let tokenBadge = '';
+      if (evt.tokens && evt.tokens.total) {
+        tokenBadge = ` <span class="code-chip" style="color:var(--accent); font-weight:700; border-color:rgba(59,130,246,0.3); background:rgba(59,130,246,0.1); margin-left:4px;">${formatTokenCount(evt.tokens.total)} tok</span>`;
+      }
+
       row.innerHTML = `
         <td style="color:var(--text-muted); font-size:0.75rem;">${evt.time}</td>
         <td><span class="pill ${methodClass}">${evt.method}</span></td>
@@ -1326,11 +1657,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <td><b style="color:#fff;">${evt.account}</b></td>
         <td><b style="color: ${statusColor};">${evt.status_text || evt.status}</b></td>
         <td style="color:var(--text-muted);">${evt.latency_ms}ms</td>
-        <td>
+        <td style="white-space:nowrap;">
           <button class="btn-inspect" onclick="openPayloadModal('${evt.id}')">
             <svg class="btn-svg" style="width:13px; height:13px;" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            <span>Telemetry (${sizeLabel})</span>
+            <span>Inspect (${sizeLabel})</span>
           </button>
+          ${tokenBadge}
         </td>
       `;
 
@@ -1354,15 +1686,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       `;
       let statusColor = evt.status >= 400 ? 'var(--red)' : 'var(--green)';
       if (evt.status === 429) statusColor = 'var(--yellow)';
+
+      let tokenMeta = '';
+      if (evt.tokens && evt.tokens.total) {
+        tokenMeta = ` &bull; Tokens: <b style="color:var(--accent);">${evt.tokens.total.toLocaleString()}</b> (Prompt: ${evt.tokens.prompt.toLocaleString()} · Output: ${evt.tokens.completion.toLocaleString()})`;
+      }
+
       document.getElementById('modalMeta').innerHTML = `
         Account: <b style="color:var(--accent);">${evt.account}</b> &bull; 
         Status: <b style="color:${statusColor}">${evt.status_text || evt.status}</b> &bull; 
-        Latency: <b>${evt.latency_ms}ms</b> &bull; Time: <b>${evt.time}</b>
+        Latency: <b>${evt.latency_ms}ms</b>${tokenMeta} &bull; Time: <b>${evt.time}</b>
       `;
       document.getElementById('modalHeaderFlow').innerHTML = `
-        <div style="margin-bottom:6px;"><span style="color:var(--text-muted);">Inbound Client Token:</span> <span class="code-chip">${evt.inbound_token}</span></div>
-        <div style="margin-bottom:6px;"><span style="color:var(--accent);">➔ Routed Account:</span> <b style="color:#fff;">${evt.account}</b></div>
-        <div><span style="color:var(--accent);">➔ Google OAuth Token:</span> <span class="code-chip">${evt.overridden_token}</span></div>
+        <div style="margin-bottom:6px;"><span style="color:var(--text-muted);">Your Token:</span> <span class="code-chip">${evt.inbound_token}</span></div>
+        <div style="margin-bottom:6px;"><span style="color:var(--accent);">➔ Selected Account:</span> <b style="color:#fff;">${evt.account}</b></div>
+        <div><span style="color:var(--accent);">➔ Google Token:</span> <span class="code-chip">${evt.overridden_token}</span></div>
       `;
 
       // Tab 1: Request
@@ -1439,10 +1777,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           fetchStatus();
         });
         evtSource.onerror = () => {
-          document.getElementById('kpiSyncStatus').innerText = 'Polling (SSE Reconnecting)';
+          document.getElementById('kpiSyncStatus').innerText = 'Reconnecting...';
         };
         evtSource.onopen = () => {
-          document.getElementById('kpiSyncStatus').innerText = 'Real-time SSE Active';
+          document.getElementById('kpiSyncStatus').innerText = 'Live Connected';
         };
       } catch (err) {
         console.warn("SSE init error:", err);

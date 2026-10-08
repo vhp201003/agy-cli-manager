@@ -144,7 +144,58 @@ def _format_body_for_log(body: bytes, headers: dict[str, str] | None = None, max
     except Exception:
         pass
 
-    return f"<binary data: {len(data)} bytes>"
+def _extract_usage_metadata(resp_bytes: bytes, resp_str: str = "") -> dict[str, int] | None:
+    """Extract token consumption (prompt, completion, total) from upstream LLM response."""
+    text_to_search = resp_str or ""
+    if not text_to_search and resp_bytes:
+        try:
+            text_to_search = resp_bytes.decode("utf-8", "ignore")
+        except Exception:
+            pass
+
+    if not text_to_search or "usageMetadata" not in text_to_search:
+        # Also check for direct tokens / usage keys (OpenAI / Anthropic style)
+        if "total_tokens" not in text_to_search and "prompt_tokens" not in text_to_search:
+            return None
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+
+    # 1. Regex check for Google Gemini usageMetadata format
+    # "promptTokenCount": 1234, "candidatesTokenCount": 567, "totalTokenCount": 1801
+    m_p = re.findall(r'["\']promptTokenCount["\']\s*:\s*(\d+)', text_to_search)
+    if m_p:
+        prompt_tokens = int(m_p[-1])
+    m_c = re.findall(r'["\']candidatesTokenCount["\']\s*:\s*(\d+)', text_to_search)
+    if m_c:
+        completion_tokens = int(m_c[-1])
+    m_t = re.findall(r'["\']totalTokenCount["\']\s*:\s*(\d+)', text_to_search)
+    if m_t:
+        total_tokens = int(m_t[-1])
+
+    # 2. Regex check for OpenAI style: "prompt_tokens": 123, "completion_tokens": 45, "total_tokens": 168
+    if total_tokens == 0:
+        m_op = re.findall(r'["\']prompt_tokens["\']\s*:\s*(\d+)', text_to_search)
+        if m_op:
+            prompt_tokens = int(m_op[-1])
+        m_oc = re.findall(r'["\']completion_tokens["\']\s*:\s*(\d+)', text_to_search)
+        if m_oc:
+            completion_tokens = int(m_oc[-1])
+        m_ot = re.findall(r'["\']total_tokens["\']\s*:\s*(\d+)', text_to_search)
+        if m_ot:
+            total_tokens = int(m_ot[-1])
+
+    if total_tokens == 0 and (prompt_tokens > 0 or completion_tokens > 0):
+        total_tokens = prompt_tokens + completion_tokens
+
+    if total_tokens > 0:
+        return {
+            "prompt": prompt_tokens,
+            "completion": completion_tokens,
+            "total": total_tokens,
+        }
+    return None
 
 
 def _extract_session_key(path: str, headers: dict[str, str], body_str: str, raw_body: bytes | None = None) -> str | None:
@@ -520,14 +571,16 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
 
                 conn.close()
 
-                # Format response sample preview
+                # Format response sample preview and extract token usage
                 resp_preview = ""
-                if resp_chunks:
+                raw_combined = b"".join(resp_chunks) if resp_chunks else b""
+                if raw_combined:
                     try:
-                        raw_combined = b"".join(resp_chunks)
                         resp_preview = _format_body_for_log(raw_combined, dict(resp.getheaders()))
                     except Exception:
                         resp_preview = f"<streamed response: {total_streamed} bytes>"
+
+                token_usage = _extract_usage_metadata(raw_combined, resp_preview)
 
                 # Broadcast successful completion to dashboard
                 broadcast_event({
@@ -547,6 +600,7 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
                     "body_size": body_size,
                     "response_preview": resp_preview,
                     "response_size": total_streamed,
+                    "tokens": token_usage,
                     "retried": attempt > 0,
                 })
 
