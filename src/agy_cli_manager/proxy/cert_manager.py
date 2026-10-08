@@ -177,28 +177,3 @@ class CertManager:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         return "True" in res.stdout
 
-    def install_ca_to_windows_store(self) -> bool:
-        return self.install_ca_windows()
-
-    def is_ca_installed_windows(self) -> bool:
-        cmd = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            "Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -like '*AGY Local Proxy CA*' } | Measure-Object | Select-Object -ExpandProperty Count",
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        try:
-            return int(res.stdout.strip()) > 0
-        except ValueError:
-            return False
-
-    def remove_ca_windows(self) -> bool:
-        cmd = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            "Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -like '*AGY Local Proxy CA*' } | Remove-Item; $?",
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return "True" in res.stdout

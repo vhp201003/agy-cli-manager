@@ -38,7 +38,6 @@ class TokenManager:
         self.state_file = self.manager_root / "state.json"
         self._accounts: dict[str, dict] = {}
         self._cooldowns: dict[str, float] = {}
-        self._rr_index = 0
         self._current_active_account: str | None = None
         self.reload_accounts()
 
@@ -268,22 +267,6 @@ class TokenManager:
 
     def get_token_for_request(self) -> tuple[str, str]:
         return self.get_token_by_session(None)
-
-    def get_token_for_specific_account(self, account_name: str) -> tuple[str, str]:
-        if not self._accounts:
-            self.reload_accounts()
-        acc = self._accounts.get(account_name)
-        if not acc:
-            # Fallback to general selection if requested account does not exist
-            return self.get_token_for_request()
-
-        # Proactively refresh token if expired
-        now = time.time()
-        expires_at = acc.get("expires_at", 0)
-        if expires_at and now >= expires_at - 120:
-            self.refresh_account_token(account_name)
-
-        return account_name, acc.get("access_token") or ""
 
     def mark_429(self, account_name: str, cooldown_seconds: int = 600) -> None:
         self._cooldowns[account_name] = time.time() + cooldown_seconds

@@ -145,7 +145,6 @@ DEFAULT_SWITCH_HISTORY_LIMIT = 20
 CODE_ASSIST_BASE_URL = "https://daily-cloudcode-pa.googleapis.com"
 CODE_ASSIST_USER_AGENT = "antigravity"
 CODE_ASSIST_LOAD_PATH = "/v1internal:loadCodeAssist"
-CODE_ASSIST_QUOTA_PATH = "/v1internal:retrieveUserQuota"
 CODE_ASSIST_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
@@ -820,10 +819,6 @@ def get_live_dir(state: dict) -> Path | None:
     return Path(value)
 
 
-def resolve_runtime_home(live_dir: Path | None = None) -> Path:
-    target_live_dir = live_dir or default_live_dir()
-    return target_live_dir.parent
-
 
 def _read_json_if_exists(path: Path) -> dict | list | None:
     if not path.is_file():
@@ -1007,19 +1002,6 @@ def _parse_summary_bucket(bucket: dict) -> dict:
     }
 
 
-def _select_quota_summary_group(summary_response: dict) -> dict | None:
-    groups = summary_response.get("groups")
-    if not isinstance(groups, list):
-        return None
-    normalized = [group for group in groups if isinstance(group, dict)]
-    if not normalized:
-        return None
-    for group in normalized:
-        display_name = group.get("displayName")
-        if isinstance(display_name, str) and "gemini" in display_name.lower():
-            return group
-    return normalized[0]
-
 
 def _quota_group_family(group: dict) -> str | None:
     buckets = group.get("buckets")
@@ -1066,10 +1048,6 @@ def _parse_quota_families_from_summary(summary_response: dict) -> tuple[dict, in
                 families[family]["weekly"] = _parse_summary_bucket(bucket)
     return families, bucket_count
 
-
-def _parse_quota_windows_from_summary(summary_response: dict) -> tuple[dict, dict, int]:
-    families, bucket_count = _parse_quota_families_from_summary(summary_response)
-    return families["gemini"]["short"], families["gemini"]["weekly"], bucket_count
 
 
 def _resolve_usage_refresh_target(paths: ManagerPaths, state: dict, name: str | None) -> tuple[str, Path]:
@@ -1154,21 +1132,6 @@ def _usage_windows_for_family(meta: dict, family: str) -> dict:
     families = _normalize_usage_families(meta)
     return families[normalized_family]
 
-
-def _is_short_window_exhausted(
-    meta: dict,
-    now: datetime | None = None,
-    *,
-    threshold_percent: float = DEFAULT_SHORT_SWITCH_THRESHOLD_PERCENT,
-    family: str = "gemini",
-) -> bool:
-    return _is_usage_window_exhausted(
-        meta,
-        "short",
-        now,
-        threshold_percent=threshold_percent,
-        family=family,
-    )
 
 
 def _is_usage_window_exhausted(

@@ -413,7 +413,7 @@ def run_menu(paths, parser: argparse.ArgumentParser) -> int:
             print(f"error: {e}")
         except KeyboardInterrupt:
             print("\nCancelled.")
-    return 0
+            return 0
 
 
 def _safe_addstr(stdscr, y: int, x: int, text: str, attr: int = 0) -> None:
@@ -703,34 +703,6 @@ def _draw_segments(stdscr, y: int, segments: list[tuple[str, int]]) -> None:
         x += len(clipped)
 
 
-def _draw_detail_line(stdscr, y: int, label: str, value: str, value_attr: int = 0) -> None:
-    _draw_segments(
-        stdscr,
-        y,
-        [
-            (f"{label}: ", _severity_attr("label")),
-            (value, value_attr),
-        ],
-    )
-
-
-def _draw_detail_line_at(stdscr, y: int, x: int, label: str, value: str, value_attr: int = 0) -> None:
-    segments = [
-        (f"{label}: ", _severity_attr("label")),
-        (value, value_attr),
-    ]
-    offset = x
-    height, width = stdscr.getmaxyx()
-    if y < 0 or y >= height or x >= width:
-        return
-    for text, attr in segments:
-        if offset >= width - 1:
-            break
-        clipped = text[: max(0, width - offset - 1)]
-        if clipped:
-            _safe_addstr(stdscr, y, offset, clipped, attr)
-        offset += len(clipped)
-
 
 def _clip_text(value: str, width: int) -> str:
     if width <= 0:
@@ -873,30 +845,6 @@ def _detail_value_attr(selected_meta: dict, label: str, now_dt: datetime) -> int
         return _severity_attr("info")
     return _severity_attr("muted")
 
-
-def _draw_detail_block(
-    stdscr,
-    start_y: int,
-    title: str,
-    rows: list[tuple[str, str, int]],
-    start_x: int = 0,
-    block_width: int | None = None,
-) -> int:
-    _safe_addstr(stdscr, start_y, start_x, title, _color_attr(COLOR_SECTION, curses.A_BOLD))
-    label_width = max((len(label) for label, _value, _attr in rows), default=0)
-    effective_width = block_width if block_width is not None else max(20, stdscr.getmaxyx()[1] - start_x - 1)
-    for idx, (label, value, value_attr) in enumerate(rows):
-        _draw_labeled_value_cell(
-            stdscr,
-            start_y + 1 + idx,
-            start_x,
-            effective_width,
-            label,
-            value,
-            value_attr,
-            label_width=label_width,
-        )
-    return 1 + len(rows)
 
 
 def _account_table_layout(width: int) -> list[dict[str, str | int]]:
@@ -1185,35 +1133,6 @@ def _format_live_state(meta: dict, now: datetime) -> str:
         return f"stale/{health}"[:18]
     return health[:18]
 
-
-def _format_switch_runtime_summary(snapshot: dict, now: datetime) -> str:
-    runtime = snapshot.get("switch_runtime") if isinstance(snapshot.get("switch_runtime"), dict) else {}
-    status = str(runtime.get("status") or "idle")
-    reason = str(runtime.get("reason") or "-")
-    trigger = str(runtime.get("trigger") or "-")
-    completed = _format_age(runtime.get("last_completed_at"), now)
-    return f"{status} | {reason} | {trigger} | {completed}"[:46]
-
-
-def _format_switch_runtime_policy(snapshot: dict, now: datetime) -> str:
-    runtime = snapshot.get("switch_runtime") if isinstance(snapshot.get("switch_runtime"), dict) else {}
-    started = _format_age(runtime.get("last_started_at"), now)
-    completed = _format_age(runtime.get("last_completed_at"), now)
-    previous = str(runtime.get("previous_active") or "-")
-    request_id = str(runtime.get("request_id") or "-")
-    return f"prev={previous} | req={request_id[:12]} | done={completed}"[:52]
-
-
-def _format_last_switch_event(snapshot: dict, now: datetime) -> str:
-    history = snapshot.get("switch_history") if isinstance(snapshot.get("switch_history"), list) else []
-    if not history:
-        return "-"
-    event = history[-1] if isinstance(history[-1], dict) else {}
-    outcome = str(event.get("outcome") or "-")
-    reason = str(event.get("reason") or "-")
-    trigger = str(event.get("trigger") or "-")
-    when = _format_age(event.get("at"), now)
-    return f"{outcome} | {reason} | {trigger} | {when}"[:52]
 
 
 def _should_auto_refresh_usage(meta: dict, now: datetime) -> bool:
@@ -1745,8 +1664,6 @@ def _dashboard(stdscr, paths) -> int:
             last_refresh = time.time()
         except ValueError as exc:
             message = f"Error: {exc}"
-
-    return 0
 
 
 def run_dashboard(paths) -> int:

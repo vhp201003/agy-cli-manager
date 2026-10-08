@@ -5,14 +5,12 @@ from contextlib import asynccontextmanager
 import json
 import logging
 from pathlib import Path
-import ssl
 import sys
 import time
 from typing import AsyncGenerator
-import urllib.request
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
@@ -22,33 +20,61 @@ for _p in (str(_current), str(_parent)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import uuid
+import httpx
+
 try:
-    from agy_cli_manager.proxy import proxy_server, token_manager, cert_manager
     from agy_cli_manager.proxy.token_manager import TokenManager
     from agy_cli_manager.proxy.proxy_server import (
         REQUEST_LOGS,
         register_event_listener,
         unregister_event_listener,
+        broadcast_event,
+        _extract_usage_metadata,
+        _format_body_for_log,
     )
+    from agy_cli_manager.proxy.translators.openai import (
+        convert_openai_messages_to_gemini,
+        convert_openai_tools_to_gemini,
+        convert_gemini_response_to_openai,
+        convert_gemini_error_to_openai,
+    )
+    from agy_cli_manager.proxy.translators.streaming import stream_gemini_to_openai
 except ImportError:
     try:
-        from . import proxy_server, token_manager, cert_manager
         from .token_manager import TokenManager
         from .proxy_server import (
             REQUEST_LOGS,
             register_event_listener,
             unregister_event_listener,
+            broadcast_event,
+            _extract_usage_metadata,
+            _format_body_for_log,
         )
+        from .translators.openai import (
+            convert_openai_messages_to_gemini,
+            convert_openai_tools_to_gemini,
+            convert_gemini_response_to_openai,
+            convert_gemini_error_to_openai,
+        )
+        from .translators.streaming import stream_gemini_to_openai
     except ImportError:
-        import proxy_server
-        import token_manager
-        import cert_manager
         from token_manager import TokenManager
         from proxy_server import (
             REQUEST_LOGS,
             register_event_listener,
             unregister_event_listener,
+            broadcast_event,
+            _extract_usage_metadata,
+            _format_body_for_log,
         )
+        from translators.openai import (
+            convert_openai_messages_to_gemini,
+            convert_openai_tools_to_gemini,
+            convert_gemini_response_to_openai,
+            convert_gemini_error_to_openai,
+        )
+        from translators.streaming import stream_gemini_to_openai
 
 logger = logging.getLogger("AgyProxy.FastAPI")
 
@@ -227,11 +253,6 @@ async def stream_logs(request: Request):
 
     return EventSourceResponse(event_generator())
 
-from agy_cli_manager.proxy.translators.openai import convert_openai_messages_to_gemini, convert_openai_tools_to_gemini, convert_gemini_response_to_openai, convert_gemini_error_to_openai
-from agy_cli_manager.proxy.translators.streaming import stream_gemini_to_openai
-import httpx
-from agy_cli_manager.proxy.proxy_server import broadcast_event, _extract_usage_metadata, _format_body_for_log
-import uuid
 
 _MODEL_MAP = {
     "gemini-1.5-pro-latest": "gemini-2.5-flash",
@@ -487,7 +508,6 @@ async def chat_completions(request: Request):
                 "retried": False,
             })
 
-    from fastapi.responses import StreamingResponse
     return StreamingResponse(generator(), media_type="text/event-stream")
 
 
