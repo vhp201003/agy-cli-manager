@@ -317,31 +317,82 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .kpi-sub { font-size: 0.74rem; color: #52525b; margin-top: 4px; }
     
     /* Account Grid */
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-bottom: 24px; }
-    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; position: relative; transition: border-color 0.2s; }
+    /* Account Section Header & Controls */
+    .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+    .section-title { font-size: 0.92rem; font-weight: 700; color: #fff; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; font-family: var(--font-sans); }
+    .section-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    
+    .view-toggle { display: inline-flex; background: #0c0c0e; border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+    .view-btn { background: transparent; border: none; color: var(--text-muted); padding: 4px 9px; font-size: 0.74rem; font-weight: 600; border-radius: 4px; cursor: pointer; transition: all 0.15s; display: inline-flex; align-items: center; gap: 5px; height: 26px; font-family: var(--font-sans); }
+    .view-btn.active { background: #222228; color: #fff; }
+    .view-btn:hover:not(.active) { color: #d4d4d8; }
+
+    .acc-filter-tabs { display: inline-flex; gap: 4px; }
+    .acc-tab-btn { background: transparent; border: 1px solid var(--border); color: var(--text-muted); padding: 4px 10px; font-size: 0.74rem; font-weight: 500; border-radius: 6px; cursor: pointer; transition: all 0.15s; height: 26px; display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); }
+    .acc-tab-btn.active { background: #1c1c22; color: #fff; border-color: #38bdf8; font-weight: 600; }
+    .acc-tab-btn:hover:not(.active) { background: #141418; color: #d4d4d8; }
+    .tab-counter { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 10px; font-size: 0.68rem; }
+
+    /* Account Grid View: Max 5 columns, 2 rows (10 accounts per page) */
+    .grid { 
+      display: grid; 
+      grid-template-columns: repeat(5, minmax(0, 1fr)); 
+      gap: 12px; 
+      margin-bottom: 16px; 
+    }
+    @media (max-width: 1700px) {
+      .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    @media (max-width: 1380px) {
+      .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 1040px) {
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 680px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 13px 14px; position: relative; transition: border-color 0.2s; }
     .card:hover { border-color: var(--border-hover); }
-    .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
-    .acc-email { font-size: 0.85rem; font-weight: 600; color: #fff; font-family: var(--font-mono); }
-    .badge { font-size: 0.68rem; padding: 2px 7px; border-radius: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--font-mono); }
+    .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; gap: 6px; }
+    .acc-email { font-size: 0.82rem; font-weight: 600; color: #fff; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; }
     .badge.active { background: rgba(34, 197, 94, 0.08); color: var(--green); border: 1px solid rgba(34, 197, 94, 0.25); }
     .badge.sticky { background: rgba(56, 189, 248, 0.08); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.25); }
     .badge.cooldown { background: rgba(245, 158, 11, 0.08); color: var(--yellow); border: 1px solid rgba(245, 158, 11, 0.25); }
+    .badge.danger { background: rgba(239, 68, 68, 0.08); color: var(--red); border: 1px solid rgba(239, 68, 68, 0.25); }
     
-    /* Modal Tabs UI */
-    .modal-tab-bar { display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 10px; }
-    .modal-tab-btn { background: transparent; border: 1px solid var(--border); color: var(--text-muted); padding: 5px 12px; border-radius: 5px; font-size: 0.75rem; cursor: pointer; transition: all 0.15s; font-family: var(--font-mono); }
-    .modal-tab-btn.active, .modal-tab-btn:hover { background: #18181b; color: #fff; border-color: #38bdf8; }
+    /* Quota Bars - Twin Inline Bar */
+    .quota-twin-box { background: var(--sub-card); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 10px; margin-top: 8px; display: flex; flex-direction: column; gap: 7px; }
+    .twin-row { display: grid; grid-template-columns: 74px 1fr auto; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 0.72rem; }
+    .twin-label { font-weight: 700; white-space: nowrap; font-size: 0.7rem; }
+    .twin-bar-wrap { height: 5px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; min-width: 40px; }
+    .twin-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+    .twin-val { text-align: right; font-weight: 600; font-size: 0.72rem; white-space: nowrap; }
+    .twin-val-sub { color: var(--text-muted); font-size: 0.65rem; font-weight: 400; margin-left: 3px; white-space: nowrap; }
     
-    /* Quota Bars */
-    .quota-box { background: var(--sub-card); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
-    .quota-title { font-size: 0.76rem; font-weight: 700; display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; letter-spacing: 0.3px; }
-    .quota-row { margin-bottom: 8px; }
-    .quota-row:last-child { margin-bottom: 0; }
-    .quota-row-header { display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 3px; font-family: var(--font-mono); }
-    .bar-bg { width: 100%; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
-    .bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
-    .reset-label { font-size: 0.7rem; color: var(--text-muted); margin-top: 2px; }
-    .meta-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem; color: var(--text-muted); margin-top: 12px; font-family: var(--font-mono); }
+    .meta-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-muted); margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.04); font-family: var(--font-mono); }
+
+    /* Account Pagination Bar */
+    .account-pagination { display: flex; justify-content: space-between; align-items: center; padding: 10px 4px 20px 4px; font-size: 0.76rem; color: var(--text-muted); font-family: var(--font-mono); }
+    .pagination-controls { display: inline-flex; align-items: center; gap: 6px; }
+    .page-btn { background: #0c0c0e; border: 1px solid var(--border); color: #d4d4d8; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.74rem; font-family: var(--font-mono); transition: all 0.15s; }
+    .page-btn:hover:not(:disabled) { background: #18181b; color: #fff; border-color: var(--border-hover); }
+    .page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .page-info { font-weight: 600; color: #fff; margin: 0 4px; }
+    
+    /* Table Mode for Accounts */
+    .account-table-container { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 24px; }
+    .acc-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.8rem; }
+    .acc-table th { color: var(--text-muted); padding: 10px 14px; border-bottom: 1px solid var(--border); background: #111114; font-weight: 600; font-family: var(--font-sans); }
+    .acc-table td { padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; font-family: var(--font-mono); }
+    .acc-table tr:hover { background: rgba(255, 255, 255, 0.02); }
+    .bar-compact-wrap { display: flex; align-items: center; gap: 8px; min-width: 170px; }
+    .bar-compact { flex: 1; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
+    .bar-compact-fill { height: 100%; border-radius: 3px; }
+    .sub-tag { font-size: 0.68rem; color: var(--text-muted); display: block; margin-top: 2px; font-family: var(--font-mono); }
+    .tooltip-anchor { cursor: help; border-bottom: 1px dotted rgba(255,255,255,0.2); }
     
     /* Telemetry Table Container */
     .telemetry-container { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
@@ -541,8 +592,62 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Account Matrix -->
+  <!-- Account Management Section Header -->
+  <div class="section-header">
+    <div class="section-title">
+      <svg class="btn-svg" viewBox="0 0 24 24" style="color:var(--accent);"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>Routing Pool Accounts</span>
+    </div>
+    <div class="section-controls">
+      <!-- Filter Tabs -->
+      <div class="acc-filter-tabs">
+        <button class="acc-tab-btn active" onclick="setAccountFilter('all', this)">All <span class="tab-counter" id="tabCountAll">0</span></button>
+        <button class="acc-tab-btn" onclick="setAccountFilter('active', this)">Active <span class="tab-counter" id="tabCountActive">0</span></button>
+        <button class="acc-tab-btn" onclick="setAccountFilter('exhausted', this)">Low / Exhausted <span class="tab-counter" id="tabCountExhausted">0</span></button>
+      </div>
+
+      <!-- View Mode Toggle: Grid vs Table -->
+      <div class="view-toggle">
+        <button class="view-btn active" id="btnViewGrid" onclick="setAccountView('grid')" title="Card Grid View">
+          <svg class="btn-svg" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span>Cards</span>
+        </button>
+        <button class="view-btn" id="btnViewTable" onclick="setAccountView('table')" title="Dense Data Table View">
+          <svg class="btn-svg" viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          <span>Table</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Account Matrix (Grid View) -->
   <div class="grid" id="accountsGrid"></div>
+
+  <!-- Pagination Bar for Accounts (Visible when items > 10) -->
+  <div class="account-pagination" id="accountsPagination" style="display:none;">
+    <div id="paginationSummary">Showing 1-10 of 20 accounts</div>
+    <div class="pagination-controls">
+      <button class="page-btn" id="btnPagePrev" onclick="changeAccountPage(-1)">← Prev</button>
+      <span class="page-info" id="pageCurrentInfo">1 / 2</span>
+      <button class="page-btn" id="btnPageNext" onclick="changeAccountPage(1)">Next →</button>
+    </div>
+  </div>
+
+  <!-- Account Table View (Dense Data Table) -->
+  <div class="account-table-container" id="accountsTableContainer" style="display:none;">
+    <table class="acc-table">
+      <thead>
+        <tr>
+          <th>Account / Profile</th>
+          <th>Status</th>
+          <th>Gemini Quota (5h / Wk)</th>
+          <th>Claude & GPT Quota (5h / Wk)</th>
+          <th style="text-align:right;">Expiry / Actions</th>
+        </tr>
+      </thead>
+      <tbody id="accountsTableBody"></tbody>
+    </table>
+  </div>
 
   <!-- Telemetry Table View -->
   <div class="telemetry-container">
@@ -704,11 +809,54 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       return defaultColor;
     }
 
+    let accountsCache = {};
+    let currentAccountFilter = 'all';
+    let currentAccountView = localStorage.getItem('agy_account_view') || 'grid';
+    let accountPage = 1;
+    const ACCOUNTS_PER_PAGE = 10; // 2 rows x 5 columns
+
+    function changeAccountPage(delta) {
+      accountPage += delta;
+      renderAccounts(accountsCache);
+    }
+
+    function setAccountView(viewMode) {
+      currentAccountView = viewMode;
+      localStorage.setItem('agy_account_view', viewMode);
+      
+      const btnGrid = document.getElementById('btnViewGrid');
+      const btnTable = document.getElementById('btnViewTable');
+      const gridContainer = document.getElementById('accountsGrid');
+      const tableContainer = document.getElementById('accountsTableContainer');
+
+      if (viewMode === 'table') {
+        btnTable.classList.add('active');
+        btnGrid.classList.remove('active');
+        gridContainer.style.display = 'none';
+        tableContainer.style.display = 'block';
+      } else {
+        btnGrid.classList.add('active');
+        btnTable.classList.remove('active');
+        gridContainer.style.display = 'grid';
+        tableContainer.style.display = 'none';
+      }
+      renderAccounts(accountsCache);
+    }
+
+    function setAccountFilter(filterType, btn) {
+      currentAccountFilter = filterType;
+      accountPage = 1; // Reset to page 1 on filter switch
+      document.querySelectorAll('.acc-tab-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      renderAccounts(accountsCache);
+    }
+
     async function fetchStatus(btn = null) {
       const doFetch = async () => {
         const res = await fetch('/api/status');
         const data = await res.json();
-        renderAccounts(data.accounts);
+        accountsCache = data.accounts || {};
+        renderAccounts(accountsCache);
         updateKPIs(data);
       };
       if (btn) await handleActionWithButton(btn, doFetch);
@@ -743,46 +891,142 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       document.getElementById('kpiTotalReqs').innerText = data.total_requests_intercepted || renderedIds.size;
     }
 
+    function calculateAccountMeta(name, acc) {
+      const q = acc.quota || {};
+      const g5h = (q.gemini && q.gemini['5h']) || { percent: 100, reset_time: null, disabled: false };
+      const gWeekly = (q.gemini && q.gemini['weekly']) || { percent: 100, reset_time: null, disabled: false };
+      const c5h = (q.third_party && q.third_party['5h']) || { percent: 100, reset_time: null, disabled: false };
+      const cWeekly = (q.third_party && q.third_party['weekly']) || { percent: 100, reset_time: null, disabled: false };
+
+      const cWeeklyExhausted = cWeekly.disabled || (cWeekly.percent <= 5.0 && Boolean(cWeekly.reset_time));
+      const gWeeklyExhausted = gWeekly.disabled || (gWeekly.percent <= 5.0 && Boolean(gWeekly.reset_time));
+      const c5hExhausted = c5h.disabled || (c5h.percent <= 5.0 && Boolean(c5h.reset_time));
+      const g5hExhausted = g5h.disabled || (g5h.percent <= 5.0 && Boolean(g5h.reset_time));
+
+      const isGeminiHealthy = !gWeeklyExhausted && !g5hExhausted;
+      const isClaudeHealthy = !cWeeklyExhausted && !c5hExhausted;
+
+      let badgeClass = 'active';
+      let badgeText = 'POOL ACTIVE';
+      let isExhaustedOrLow = false;
+
+      if (acc.in_cooldown) {
+        badgeClass = 'cooldown';
+        badgeText = `COOLDOWN (${acc.cooldown_remaining_sec}s)`;
+        isExhaustedOrLow = true;
+      } else if (!isGeminiHealthy && !isClaudeHealthy) {
+        badgeClass = 'danger';
+        badgeText = 'ALL EXHAUSTED';
+        isExhaustedOrLow = true;
+      } else if (!isClaudeHealthy) {
+        badgeClass = 'active';
+        badgeText = 'GEMINI ONLY';
+        isExhaustedOrLow = true;
+      } else if (!isGeminiHealthy) {
+        badgeClass = 'active';
+        badgeText = 'CLAUDE ONLY';
+        isExhaustedOrLow = true;
+      }
+
+      const c5hEffectivePct = cWeeklyExhausted ? 0 : c5h.percent;
+      const g5hEffectivePct = gWeeklyExhausted ? 0 : g5h.percent;
+
+      const emailDisplay = acc.email && acc.email.includes('@') ? acc.email : (acc.email || name);
+      const nameDisplay = acc.display_name && acc.display_name !== name ? acc.display_name : '';
+
+      return {
+        name,
+        acc,
+        emailDisplay,
+        nameDisplay,
+        g5h, gWeekly, c5h, cWeekly,
+        gWeeklyExhausted, cWeeklyExhausted,
+        g5hEffectivePct, c5hEffectivePct,
+        isGeminiHealthy, isClaudeHealthy,
+        badgeClass, badgeText,
+        isExhaustedOrLow
+      };
+    }
+
     function renderAccounts(accounts) {
+      accountsCache = accounts || {};
+      const entries = Object.entries(accountsCache);
+      
+      let countAll = entries.length;
+      let countActive = 0;
+      let countExhausted = 0;
+
+      const items = entries.map(([name, acc]) => {
+        const meta = calculateAccountMeta(name, acc);
+        if (meta.isExhaustedOrLow) countExhausted++;
+        else countActive++;
+        return meta;
+      });
+
+      // Update counters
+      const elAll = document.getElementById('tabCountAll');
+      const elAct = document.getElementById('tabCountActive');
+      const elExh = document.getElementById('tabCountExhausted');
+      if (elAll) elAll.innerText = countAll;
+      if (elAct) elAct.innerText = countActive;
+      if (elExh) elExh.innerText = countExhausted;
+
+      // Filter
+      const filtered = items.filter(item => {
+        if (currentAccountFilter === 'active') return !item.isExhaustedOrLow;
+        if (currentAccountFilter === 'exhausted') return item.isExhaustedOrLow;
+        return true;
+      });
+
+      // Pagination calculation (Max 10 accounts: 2 rows x 5 columns)
+      const totalItems = filtered.length;
+      const totalPages = Math.max(1, Math.ceil(totalItems / ACCOUNTS_PER_PAGE));
+      if (accountPage > totalPages) accountPage = totalPages;
+      if (accountPage < 1) accountPage = 1;
+
+      const startIndex = (accountPage - 1) * ACCOUNTS_PER_PAGE;
+      const paginatedItems = filtered.slice(startIndex, startIndex + ACCOUNTS_PER_PAGE);
+
+      // Update Pagination UI
+      const pagContainer = document.getElementById('accountsPagination');
+      if (pagContainer) {
+        if (totalItems > ACCOUNTS_PER_PAGE) {
+          pagContainer.style.display = 'flex';
+          const endDisplay = Math.min(startIndex + ACCOUNTS_PER_PAGE, totalItems);
+          document.getElementById('paginationSummary').innerText = `Showing ${startIndex + 1}-${endDisplay} of ${totalItems} accounts`;
+          document.getElementById('pageCurrentInfo').innerText = `${accountPage} / ${totalPages}`;
+          document.getElementById('btnPagePrev').disabled = accountPage <= 1;
+          document.getElementById('btnPageNext').disabled = accountPage >= totalPages;
+        } else {
+          pagContainer.style.display = 'none';
+        }
+      }
+
+      if (currentAccountView === 'table') {
+        renderAccountsTable(filtered); // Table can show all filtered or paginated
+      } else {
+        renderAccountsGrid(paginatedItems);
+      }
+    }
+
+    function renderAccountsGrid(items) {
       const container = document.getElementById('accountsGrid');
       container.innerHTML = '';
-      for (const [name, acc] of Object.entries(accounts)) {
-        const q = acc.quota || {};
-        const g5h = (q.gemini && q.gemini['5h']) || { percent: 100, reset_time: null, disabled: false };
-        const gWeekly = (q.gemini && q.gemini['weekly']) || { percent: 100, reset_time: null, disabled: false };
-        const c5h = (q.third_party && q.third_party['5h']) || { percent: 100, reset_time: null, disabled: false };
-        const cWeekly = (q.third_party && q.third_party['weekly']) || { percent: 100, reset_time: null, disabled: false };
 
-        const cWeeklyExhausted = cWeekly.disabled || (cWeekly.percent <= 5.0 && Boolean(cWeekly.reset_time));
-        const gWeeklyExhausted = gWeekly.disabled || (gWeekly.percent <= 5.0 && Boolean(gWeekly.reset_time));
-        const c5hExhausted = c5h.disabled || (c5h.percent <= 5.0 && Boolean(c5h.reset_time));
-        const g5hExhausted = g5h.disabled || (g5h.percent <= 5.0 && Boolean(g5h.reset_time));
+      if (items.length === 0) {
+        container.innerHTML = `<div style="grid-column: 1 / -1; padding: 36px; text-align: center; color: var(--text-muted); font-size: 0.85rem; border: 1px dashed var(--border); border-radius: 8px;">No accounts found for current filter.</div>`;
+        return;
+      }
 
-        const isGeminiHealthy = !gWeeklyExhausted && !g5hExhausted;
-        const isClaudeHealthy = !cWeeklyExhausted && !c5hExhausted;
+      for (const item of items) {
+        const { name, acc, emailDisplay, nameDisplay, badgeClass, badgeText, isGeminiHealthy, isClaudeHealthy, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct } = item;
+        const g5hColor = getBarColor(g5hEffectivePct, 'var(--accent)');
+        const c5hColor = getBarColor(c5hEffectivePct, 'var(--purple)');
+        const gWkTime = formatTimeUntil(gWeekly.reset_time);
+        const cWkTime = formatTimeUntil(cWeekly.reset_time);
+        const g5hTime = formatTimeUntil(g5h.reset_time);
+        const c5hTime = formatTimeUntil(c5h.reset_time);
 
-        let badgeClass = 'active';
-        let badgeText = 'POOL ACTIVE';
-        if (acc.in_cooldown) {
-          badgeClass = 'cooldown';
-          badgeText = `COOLDOWN (${acc.cooldown_remaining_sec}s)`;
-        } else if (!isGeminiHealthy && !isClaudeHealthy) {
-          badgeClass = 'cooldown';
-          badgeText = 'ALL EXHAUSTED';
-        } else if (!isClaudeHealthy) {
-          badgeClass = 'active';
-          badgeText = 'GEMINI ONLY';
-        } else if (!isGeminiHealthy) {
-          badgeClass = 'active';
-          badgeText = 'CLAUDE ONLY';
-        }
-
-        // 5h limit represents the current 5-hour session capacity; only show 0% if weekly quota is exhausted or 5h <= 5.0%
-        const c5hEffectivePct = cWeeklyExhausted ? 0 : c5h.percent;
-        const g5hEffectivePct = gWeeklyExhausted ? 0 : g5h.percent;
-
-        const emailDisplay = acc.email && acc.email.includes('@') ? acc.email : (acc.email || name);
-        const nameDisplay = acc.display_name && acc.display_name !== name ? acc.display_name : '';
         const card = document.createElement('div');
         card.className = 'card';
         card.innerHTML = `
@@ -793,72 +1037,43 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               </div>
               <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
                 <span class="code-chip" style="color:var(--accent);">Profile: ${name}</span>
-                ${nameDisplay ? `<span style="font-size: 0.76rem; color: var(--text-muted);">${nameDisplay}</span>` : ''}
+                ${nameDisplay ? `<span style="font-size: 0.74rem; color: var(--text-muted);">${nameDisplay}</span>` : ''}
               </div>
             </div>
             <div class="badge ${badgeClass}">${badgeText}</div>
           </div>
 
-          <!-- Section 1: Gemini Quota -->
-          <div class="quota-box">
-            <div class="quota-title" style="color: var(--accent);">
-              <span>Gemini Limits</span>
-              <span style="font-size:0.7rem; color:${isGeminiHealthy ? 'var(--green)' : 'var(--red)'}; font-weight: 600;">${isGeminiHealthy ? '● Ready' : '● Exhausted'}</span>
+          <!-- Dual Inline Quota Box (Primary 5H Progress Bar) -->
+          <div class="quota-twin-box">
+            <!-- Row 1: Gemini -->
+            <div class="twin-row" title="Gemini 5h: ${Number(g5hEffectivePct).toFixed(1)}% | Weekly: ${Number(gWeekly.percent).toFixed(1)}% (${gWkTime})">
+              <span class="twin-label" style="color:var(--accent);">Gemini</span>
+              <div class="twin-bar-wrap">
+                <div class="twin-bar-fill" style="width: ${g5hEffectivePct}%; background: ${g5hColor};"></div>
+              </div>
+              <div class="twin-val" style="color:${g5hColor};">
+                ${gWeeklyExhausted ? '<span style="color:var(--red);">0%</span>' : (g5h.percent <= 5.0 && g5h.reset_time ? '<span style="color:var(--red);">≤5%</span>' : Number(g5hEffectivePct).toFixed(0) + '%')}
+                <span class="twin-val-sub" style="color:${gWeeklyExhausted ? 'var(--red)' : 'var(--text-muted)'};">(Wk: ${gWeeklyExhausted ? '≤5%' : Number(gWeekly.percent).toFixed(0) + '%'})</span>
+              </div>
             </div>
-            <div class="quota-row">
-              <div class="quota-row-header">
-                <span>Weekly Limit:</span>
-                <b>${gWeeklyExhausted ? '<span style="color:var(--red);">Exhausted (≤5%)</span>' : Number(gWeekly.percent).toFixed(2) + '%'}</b>
+
+            <!-- Row 2: Claude / GPT -->
+            <div class="twin-row" title="Claude & GPT 5h: ${Number(c5hEffectivePct).toFixed(1)}% | Weekly: ${Number(cWeekly.percent).toFixed(1)}% (${cWkTime})">
+              <span class="twin-label" style="color:var(--purple);">Claude/GPT</span>
+              <div class="twin-bar-wrap">
+                <div class="twin-bar-fill" style="width: ${c5hEffectivePct}%; background: ${c5hColor};"></div>
               </div>
-              <div class="bar-bg">
-                <div class="bar-fill" style="width: ${gWeekly.percent}%; background: ${getBarColor(gWeekly.percent, 'var(--accent)')}"></div>
+              <div class="twin-val" style="color:${c5hColor};">
+                ${cWeeklyExhausted ? '<span style="color:var(--red);">0%</span>' : (c5h.percent <= 5.0 && c5h.reset_time ? '<span style="color:var(--red);">≤5%</span>' : Number(c5hEffectivePct).toFixed(0) + '%')}
+                <span class="twin-val-sub" style="color:${cWeeklyExhausted ? 'var(--red)' : 'var(--text-muted)'};">(Wk: ${cWeeklyExhausted ? '≤5%' : Number(cWeekly.percent).toFixed(0) + '%'})</span>
               </div>
-              <div class="reset-label">${formatTimeUntil(gWeekly.reset_time)}</div>
-            </div>
-            <div class="quota-row" style="margin-top: 8px;">
-              <div class="quota-row-header">
-                <span>Five Hour Limit:</span>
-                <b>${gWeeklyExhausted ? '<span style="color:var(--red);">0% (Weekly Limit)</span>' : (g5h.percent <= 5.0 && g5h.reset_time ? '<span style="color:var(--red);">Exhausted (≤5%)</span>' : Number(g5hEffectivePct).toFixed(2) + '%')}</b>
-              </div>
-              <div class="bar-bg">
-                <div class="bar-fill" style="width: ${g5hEffectivePct}%; background: ${getBarColor(g5hEffectivePct, 'var(--accent)')}"></div>
-              </div>
-              <div class="reset-label">${gWeeklyExhausted ? 'Blocked by weekly limit' : formatTimeUntil(g5h.reset_time)}</div>
             </div>
           </div>
 
-          <!-- Section 2: Claude & GPT Quota -->
-          <div class="quota-box" style="border-color: rgba(192, 132, 252, 0.2);">
-            <div class="quota-title" style="color: var(--purple);">
-              <span>Claude & GPT Limits</span>
-              <span style="font-size:0.7rem; color:${isClaudeHealthy ? 'var(--green)' : 'var(--red)'}; font-weight: 600;">${isClaudeHealthy ? '● Ready' : '● Exhausted'}</span>
-            </div>
-            <div class="quota-row">
-              <div class="quota-row-header">
-                <span>Weekly Limit:</span>
-                <b>${cWeeklyExhausted ? '<span style="color:var(--red);">Exhausted (≤5%)</span>' : Number(cWeekly.percent).toFixed(2) + '%'}</b>
-              </div>
-              <div class="bar-bg">
-                <div class="bar-fill" style="width: ${cWeekly.percent}%; background: ${getBarColor(cWeekly.percent, 'var(--purple)')}"></div>
-              </div>
-              <div class="reset-label">${formatTimeUntil(cWeekly.reset_time)}</div>
-            </div>
-            <div class="quota-row" style="margin-top: 8px;">
-              <div class="quota-row-header">
-                <span>Five Hour Limit:</span>
-                <b>${cWeeklyExhausted ? '<span style="color:var(--red);">0% (Weekly Limit)</span>' : (c5h.percent <= 5.0 && c5h.reset_time ? '<span style="color:var(--red);">Exhausted (≤5%)</span>' : Number(c5hEffectivePct).toFixed(2) + '%')}</b>
-              </div>
-              <div class="bar-bg">
-                <div class="bar-fill" style="width: ${c5hEffectivePct}%; background: ${getBarColor(c5hEffectivePct, 'var(--purple)')}"></div>
-              </div>
-              <div class="reset-label">${cWeeklyExhausted ? 'Blocked by weekly limit' : formatTimeUntil(c5h.reset_time)}</div>
-            </div>
-          </div>
-
+          <!-- Bottom Footer Row: Exp & Actions -->
           <div class="meta-row">
             <span>Exp: <b>${acc.token_expires_in_min}m</b></span>
-            <span>OAuth: <b style="color: ${acc.has_refresh_token ? 'var(--green)' : 'var(--red)'};">${acc.has_refresh_token ? 'Connected' : 'Missing'}</b></span>
-            <div style="display: flex; gap: 6px;">
+            <div style="display:flex; gap:6px;">
               <button onclick="warmupSingle('${name}', this)" class="card-btn" title="Trigger 5H Window for ${name}">
                 <svg class="btn-svg" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
                 <span>Warmup</span>
@@ -871,6 +1086,67 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           </div>
         `;
         container.appendChild(card);
+      }
+    }
+
+    function renderAccountsTable(items) {
+      const tbody = document.getElementById('accountsTableBody');
+      tbody.innerHTML = '';
+
+      if (items.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:36px; color:var(--text-muted);">No accounts found for current filter.</td></tr>`;
+        return;
+      }
+
+      for (const item of items) {
+        const { name, acc, emailDisplay, nameDisplay, badgeClass, badgeText, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct } = item;
+        const tr = document.createElement('tr');
+        
+        const g5hColor = getBarColor(g5hEffectivePct, 'var(--accent)');
+        const c5hColor = getBarColor(c5hEffectivePct, 'var(--purple)');
+        const gWkTime = formatTimeUntil(gWeekly.reset_time);
+        const cWkTime = formatTimeUntil(cWeekly.reset_time);
+
+        tr.innerHTML = `
+          <td>
+            <div style="font-weight:600; color:#fff;">${emailDisplay}</div>
+            <div style="display:flex; align-items:center; gap:6px; margin-top:3px;">
+              <span class="code-chip" style="color:var(--accent); font-size:0.7rem;">${name}</span>
+              ${nameDisplay ? `<span style="font-size:0.72rem; color:var(--text-muted);">${nameDisplay}</span>` : ''}
+            </div>
+          </td>
+          <td>
+            <span class="badge ${badgeClass}">${badgeText}</span>
+          </td>
+          <td>
+            <div class="bar-compact-wrap" title="5h: ${Number(g5hEffectivePct).toFixed(1)}% | Weekly: ${Number(gWeekly.percent).toFixed(1)}%">
+              <div class="bar-compact">
+                <div class="bar-compact-fill" style="width:${g5hEffectivePct}%; background:${g5hColor};"></div>
+              </div>
+              <span style="font-weight:600; font-size:0.76rem; width:46px; text-align:right;">${Number(g5hEffectivePct).toFixed(1)}%</span>
+            </div>
+            <span class="sub-tag">Wk: <b>${gWeeklyExhausted ? 'Exhausted' : Number(gWeekly.percent).toFixed(1) + '%'}</b> · <span class="tooltip-anchor" title="${gWkTime}">${gWkTime}</span></span>
+          </td>
+          <td>
+            <div class="bar-compact-wrap" title="5h: ${Number(c5hEffectivePct).toFixed(1)}% | Weekly: ${Number(cWeekly.percent).toFixed(1)}%">
+              <div class="bar-compact">
+                <div class="bar-compact-fill" style="width:${c5hEffectivePct}%; background:${c5hColor};"></div>
+              </div>
+              <span style="font-weight:600; font-size:0.76rem; width:46px; text-align:right;">${cWeeklyExhausted ? '0.0%' : Number(c5hEffectivePct).toFixed(1) + '%'}</span>
+            </div>
+            <span class="sub-tag">Wk: <b>${cWeeklyExhausted ? 'Exhausted' : Number(cWeekly.percent).toFixed(1) + '%'}</b> · <span class="tooltip-anchor" title="${cWkTime}">${cWkTime}</span></span>
+          </td>
+          <td style="text-align:right;">
+            <div style="display:inline-flex; align-items:center; gap:10px;">
+              <span class="sub-tag" style="margin:0;">Exp: <b>${acc.token_expires_in_min}m</b></span>
+              <button onclick="refreshSingle('${name}', this)" class="card-btn" title="Refresh Token">
+                <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                <span>Refresh</span>
+              </button>
+            </div>
+          </td>
+        `;
+        tbody.appendChild(tr);
       }
     }
 
@@ -1173,6 +1449,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    setAccountView(currentAccountView);
     fetchStatus();
     pollLogs();
     initSSE();
