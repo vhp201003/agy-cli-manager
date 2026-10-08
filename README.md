@@ -13,14 +13,12 @@ It helps you run multiple Antigravity CLI accounts more safely by:
 Keywords:
 Antigravity CLI account manager, Antigravity CLI multi account manager, Antigravity multi account auth, Antigravity login manager, Antigravity auth manager, Antigravity account switcher, agy multi account manager, agy multi account auth, agy login manager, agy auth manager, agy failover, agy quota switching, Gemini CLI multi account auth, Gemini CLI account rotation.
 
-It is designed for one active account at a time:
+It operates in two complementary modes:
 
-- keep multiple saved `agy` profiles
-- switch the active profile explicitly or after failure
-- expose machine-readable state for external callers
-- stay usable as a CLI app, TUI dashboard, or Python library
+- **CLI Profile Switcher:** Active-standby filesystem rotation for interactive Antigravity CLI sessions, watching logs for quota exhaustion and failing over automatically.
+- **Multi-Account Proxy & OpenAI Gateway:** Concurrent token pool with automatic 429/403 failover, live telemetry web dashboard, and standard OpenAI-compatible `/v1/chat/completions` API.
 
-It is application-agnostic. A Telegram bot can call it, but the manager itself is not Telegram-specific.
+It is application-agnostic. A Telegram bot or external coding agent can call it, but the manager itself is not client-specific.
 
 ![Sanitized dashboard example](docs/dashboard-screenshot.svg)
 
@@ -134,31 +132,57 @@ agy-cli-manager list
 agy-cli-manager
 ```
 
-### 5. Multi-Account Live Proxy & Web Dashboard
+### 5. Multi-Account Proxy & OpenAI API Gateway
 
-Run the built-in HTTP/HTTPS reverse proxy with token pooling, auto-routing on 429, and live telemetry web dashboard:
+Run the built-in dual-surface gateway with token pooling, automatic 429/403 failover, live web telemetry, and standard OpenAI `/v1/chat/completions` API:
 
 ```bash
 # Install proxy dependencies
 pip install ".[proxy]"
 
-# Start proxy & web dashboard (http://127.0.0.1:8800)
+# Start proxy gateway (Web Dashboard & API on :8800, forward proxy on :8899)
 agy-cli-manager proxy
 ```
 
-Then in your working terminal, run:
+The server exposes two distinct ports:
+- **Port `8899`** (`--proxy-port`): Forward HTTP/HTTPS proxy for Antigravity CLI (`agy-run`) with SSL interception.
+- **Port `8800`** (`--dashboard-port`): FastAPI server hosting the Web Dashboard, interactive OpenAPI docs (`/docs`), and OpenAI-compatible API (`/v1/chat/completions`).
+
+#### Using with Antigravity CLI
+In your working terminal, run:
 ```powershell
 agy-run
 # or: agy-cli-manager run
 ```
-*(Automatically hooks proxy if active and configures SSL cert, or safely falls back to native `agy` if proxy is offline).*
+*(Automatically hooks into the proxy at `127.0.0.1:8899` and configures the SSL certificate, or safely falls back to native `agy` if the proxy is offline).*
+
+#### Using the OpenAI-Compatible API (`/v1/chat/completions`)
+Call the endpoint directly with curl or any HTTP client:
+```bash
+curl http://127.0.0.1:8800/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer any-key" \
+  -H "x-session-id: agent-session-1" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }'
+```
+
+Or configure any OpenAI SDK, agent, or tool (Cursor, Cline, Aider, OpenCode):
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:8800/v1"
+export OPENAI_API_KEY="none"
+```
 
 Features included:
-- **Round-robin request routing** across discovered Windows Credential Manager accounts (`gemini:antigravity:acc*`)
-- **Instant 429 failover** with exponential backoff & cooldown tracking
-- **Live SSE Telemetry Dashboard** with payload inspection & JSON color tokenizing
-- **1-Click 5H Window Quota Trigger**: starts the 5h window proactively for all accounts using minimal token cost (`daily-cloudcode-pa.googleapis.com`)
-- **Auto-refreshed OAuth tokens** in the background
+- **Automatic Model Translation:** Aliases legacy and standard model names (e.g., `gemini-1.5-pro-latest` mapped to `gemini-2.5-flash`).
+- **Bidirectional Tool Calling:** Full translation between OpenAI `tools`/`tool_calls` and Gemini `functionDeclarations`/`functionResponse`.
+- **Streaming:** Server-Sent Events (`stream: true`) fully compatible with standard OpenAI streaming clients.
+- **Resilient Multi-Account Routing:** Manages account token pools, preserves session stickiness via `x-session-id` (or agent request IDs), auto-refreshes OAuth tokens, and transparently retries on `429`/`403` with cooldown backoff.
+- **Live SSE Telemetry Dashboard:** Web interface at `http://127.0.0.1:8800` with payload inspection and token statistics.
+- **1-Click 5H Window Quota Trigger:** Proactively initializes the 5h quota window across all accounts using minimal token cost (`daily-cloudcode-pa.googleapis.com`).
 
 ### 6. Auto-switch when quota is full
 
@@ -236,55 +260,10 @@ agy-cli-manager apply-active
 
 This is useful when another process launches `agy` and you want that live home to always reflect the currently active saved profile.
 
-Commands:
+For a full list of available subcommands and flags, run:
 
 ```bash
-agy-cli-manager
-agy-cli-manager dashboard
-agy-cli-manager menu
-agy-cli-manager init
-agy-cli-manager list
-agy-cli-manager current
-agy-cli-manager status
-agy-cli-manager status --json
-agy-cli-manager ensure-active
-agy-cli-manager switch-mode
-agy-cli-manager switch-mode manual
-agy-cli-manager switch-mode auto
-agy-cli-manager switch-policy
-agy-cli-manager refresh-usage
-agy-cli-manager refresh-usage account1 --json
-agy-cli-manager refresh-due
-agy-cli-manager refresh-due --json
-agy-cli-manager models
-agy-cli-manager models --json
-agy-cli-manager models account1 --json
-agy-cli-manager whoami
-agy-cli-manager whoami account1 --refresh
-agy-cli-manager whoami account1 --probe-usage --agy-binary /path/to/agy
-agy-cli-manager add account1 /path/to/source
-agy-cli-manager import-current account1
-agy-cli-manager import-current account1 /path/to/.gemini
-agy-cli-manager login
-agy-cli-manager login account1 --agy-binary /path/to/agy
-agy-cli-manager activate account1
-agy-cli-manager switch account1
-agy-cli-manager rotate
-agy-cli-manager switch-next
-agy-cli-manager disable account1
-agy-cli-manager enable account1
-agy-cli-manager mark-bad account1 --reason quota --cooldown-minutes 60
-agy-cli-manager clear-bad account1
-agy-cli-manager set-live-dir ~/.gemini
-agy-cli-manager apply-active
-agy-cli-manager switch-mode manual
-agy-cli-manager rotate-after-failure --reason quota --cooldown-minutes 60 --json
-agy-cli-manager rotate-after-failure --reason quota --cooldown-minutes 60 --force-switch --json
-agy-cli-manager watch
-agy-cli-manager watch --once --json
-agy-cli-manager watch --no-rotate --once
-agy-cli-manager update-meta account1 --usage-status known --usage-value 42 --reset-at 2026-07-01T00:00:00+00:00 --health-status healthy --last-live-check-at 2026-06-30T06:00:00+00:00 --next-live-check-at 2026-06-30T06:30:00+00:00 --refresh-policy-seconds 1800
-agy-cli-manager update-meta account1 --short-usage-status known --short-usage-value 97.57 --short-reset-at 2026-07-01T00:00:00+00:00 --weekly-usage-status unknown
+agy-cli-manager --help
 ```
 
 `add` accepts either:
@@ -412,25 +391,7 @@ print([model["name"] for model in models["models"]])
 
 Public Python API:
 
-- `build_paths(root)`
-- `ensure_layout(paths)`
-- `get_status_snapshot(paths)`
-- `get_switch_policy(paths)`
-- `update_switch_policy(paths, ...)`
-- `ensure_active_account(paths, force=False, required_family=None)`
-- `resolve_route(paths, preferred_family, fallback_strategy=None, force_switch=False)`
-- `list_models(paths, name=None, ...)`
-- `refresh_account_usage(paths, name=None, ...)`
-- `refresh_due_account(paths, ...)`
-- `switch_account(paths, name)`
-- `switch_next(paths)`
-- `rotate_after_failure(paths, reason, cooldown_minutes=60, live_dir=None, force_switch=False, required_family=None)`
-- `poll_quota_logs(paths, ...)`
-- `watch_quota_logs(paths, ...)`
-- `parse_quota_log_line(line)`
-- `set_switch_mode(paths, mode)`
-- `set_live_dir(paths, live_dir)`
-- `update_account_runtime_metadata(paths, name, ...)`
+Import core coordinator routines directly from `agy_cli_manager` (see [`src/agy_cli_manager/__init__.py`](src/agy_cli_manager/__init__.py) for public exports).
 
 Important returned state:
 
@@ -458,4 +419,12 @@ ensure_layout(paths)
 payload = list_models(paths)
 for model in payload["models"]:
     print(model["name"], model["variant"])
+```
+
+## Running Tests
+
+Run the test suite using pytest:
+
+```bash
+python -m pytest tests/unit/ tests/integration/ tests/test_router.py
 ```

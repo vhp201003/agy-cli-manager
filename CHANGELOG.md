@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- add OpenAI-compatible `/v1/chat/completions` API endpoint to the proxy server (FastAPI port 8800) with both non-streaming and Server-Sent Events (SSE) streaming support
+- support bidirectional tool calling translation between OpenAI function specs and Gemini function declarations/responses
+- add automatic model translation and fallback routing for Gemini models (e.g. `gemini-1.5-*` mapped to `gemini-2.5-flash`)
+- support multi-account pool routing with session stickiness (`x-session-id`), automatic OAuth token refresh, and transparent 429/403 failover with cooldown backoff
 - parse and persist separate Gemini and Claude/GPT-OSS quota families
 - show five-hour and weekly quota for both model families in the TUI
 - add family-aware failover selection with `--family gemini|other`
@@ -10,6 +14,11 @@
 - keep quota cooldowns scoped to the depleted family instead of disabling the whole account
 - expose persisted model-family usage in status snapshots used by the TUI and JSON API
 - add `resolve-route` for configurable account-first, family-first, or strict-family routing decisions
+
+### Fixes & Refactoring
+
+- clean up deprecated CLI drawing utilities and dead quota parsers
+- migrate router test scripts to pytest test suite (`tests/test_router.py`)
 
 ## v0.2.2 - 2026-09-21
 
