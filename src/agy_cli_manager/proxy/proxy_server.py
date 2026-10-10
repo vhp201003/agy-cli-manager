@@ -28,13 +28,16 @@ for _p in (str(_current), str(_parent)):
 try:
     from agy_cli_manager.proxy.cert_manager import CertManager
     from agy_cli_manager.proxy.token_manager import TokenManager
+    from agy_cli_manager.proxy.db import get_telemetry_db
 except ImportError:
     try:
         from cert_manager import CertManager
         from token_manager import TokenManager
+        from db import get_telemetry_db
     except ImportError:
         from .cert_manager import CertManager
         from .token_manager import TokenManager
+        from .db import get_telemetry_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +101,11 @@ def broadcast_event(event: dict) -> None:
             listener(event)
         except Exception:
             pass
+
+    try:
+        get_telemetry_db().log_event(event)
+    except Exception:
+        pass
 
 
 def _format_body_for_log(body: bytes, headers: dict[str, str] | None = None, max_len: int = 60000) -> str:
