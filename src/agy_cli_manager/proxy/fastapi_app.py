@@ -25,6 +25,7 @@ import httpx
 
 try:
     from agy_cli_manager.proxy.token_manager import TokenManager
+    from agy_cli_manager.proxy.db import get_telemetry_db
     from agy_cli_manager.proxy.proxy_server import (
         REQUEST_LOGS,
         register_event_listener,
@@ -43,6 +44,7 @@ try:
 except ImportError:
     try:
         from .token_manager import TokenManager
+        from .db import get_telemetry_db
         from .proxy_server import (
             REQUEST_LOGS,
             register_event_listener,
@@ -60,6 +62,7 @@ except ImportError:
         from .translators.streaming import stream_gemini_to_openai
     except ImportError:
         from token_manager import TokenManager
+        from db import get_telemetry_db
         from proxy_server import (
             REQUEST_LOGS,
             register_event_listener,
@@ -115,10 +118,19 @@ async def lifespan(app: FastAPI):
     tm_instance.refresh_all_accounts(force=False)
     tm_instance.fetch_all_quotas()
 
+    telemetry_db = get_telemetry_db()
+    telemetry_db.start()
+    try:
+        await asyncio.to_thread(telemetry_db.prune_retention)
+    except Exception:
+        pass
+
     cron_task = asyncio.create_task(cron_token_refresh_task(interval_seconds=600))
     yield
     cron_task.cancel()
     unregister_event_listener(proxy_event_listener)
+    telemetry_db.flush()
+    telemetry_db.close()
 
 
 app = FastAPI(
@@ -143,52 +155,51 @@ async def get_status():
     total_accs = len(status)
     active_accs = sum(1 for a in status.values() if a["is_active"])
 
-    # Aggregate telemetry metrics across intercepted logs
-    logs = list(REQUEST_LOGS)
-    total_reqs = len(logs)
-    failovers = sum(1 for r in logs if r.get("retried") or r.get("status") == 429)
-    success_reqs = sum(1 for r in logs if r.get("status") and r.get("status") < 400)
-    success_rate = round((success_reqs / total_reqs * 100), 1) if total_reqs > 0 else 100.0
-
-    total_tokens = 0
-    prompt_tokens = 0
-    completion_tokens = 0
-    latencies = []
-
-    for r in logs:
-        t = r.get("tokens")
-        if t and isinstance(t, dict):
-            total_tokens += t.get("total", 0)
-            prompt_tokens += t.get("prompt", 0)
-            completion_tokens += t.get("completion", 0)
-        lat = r.get("latency_ms")
-        if lat is not None:
-            latencies.append(lat)
-
-    avg_latency = round(sum(latencies) / len(latencies), 0) if latencies else 0
+    telemetry_db = get_telemetry_db()
+    stats = await asyncio.to_thread(telemetry_db.query_aggregate_stats)
 
     return {
         "pool_size": total_accs,
         "available_accounts": active_accs,
         "proxy_port": 8899,
         "accounts": status,
-        "total_requests_intercepted": total_reqs,
-        "failover_count": failovers,
-        "success_rate": success_rate,
+        "total_requests_intercepted": stats["total_requests"],
+        "failover_count": stats["failover_count"],
+        "success_rate": stats["success_rate"],
         "tokens": {
-            "total": total_tokens,
-            "prompt": prompt_tokens,
-            "completion": completion_tokens,
+            "total": stats["total_tokens"],
+            "prompt": stats["prompt_tokens"],
+            "completion": stats["completion_tokens"],
         },
-        "avg_latency_ms": int(avg_latency),
+        "avg_latency_ms": stats["avg_latency_ms"],
         "timestamp": time.time(),
     }
 
 
-
 @app.get("/api/logs")
-async def get_logs():
-    return list(REQUEST_LOGS)
+async def get_logs(
+    limit: int = 100,
+    offset: int = 0,
+    account: str | None = None,
+    model: str | None = None,
+    status: int | None = None,
+):
+    telemetry_db = get_telemetry_db()
+    logs, _ = await asyncio.to_thread(
+        telemetry_db.query_logs,
+        limit=limit,
+        offset=offset,
+        account=account,
+        model=model,
+        status=status,
+    )
+    return logs
+
+
+@app.get("/api/analytics/tokens")
+async def get_token_analytics(range_days: int = 7):
+    telemetry_db = get_telemetry_db()
+    return await asyncio.to_thread(telemetry_db.query_token_analytics, range_days=range_days)
 
 
 @app.post("/api/refresh-all")
@@ -671,9 +682,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       .grid { grid-template-columns: 1fr; }
     }
 
-    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 13px 14px; position: relative; transition: border-color 0.2s; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 11px 13px; position: relative; transition: border-color 0.2s; }
     .card:hover { border-color: var(--border-hover); }
-    .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; gap: 6px; }
+    .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 7px; gap: 6px; }
     .acc-email { font-size: 0.82rem; font-weight: 600; color: #fff; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; }
     .badge.active { background: rgba(34, 197, 94, 0.08); color: var(--green); border: 1px solid rgba(34, 197, 94, 0.25); }
@@ -682,15 +693,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .badge.danger { background: rgba(239, 68, 68, 0.08); color: var(--red); border: 1px solid rgba(239, 68, 68, 0.25); }
     
     /* Quota Bars - Twin Inline Bar */
-    .quota-twin-box { background: var(--sub-card); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 10px; margin-top: 8px; display: flex; flex-direction: column; gap: 7px; }
+    .quota-twin-box { background: var(--sub-card); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 6px 9px; margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+    .twin-block { display: flex; flex-direction: column; gap: 3px; }
     .twin-row { display: grid; grid-template-columns: 74px 1fr auto; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 0.72rem; }
     .twin-label { font-weight: 700; white-space: nowrap; font-size: 0.7rem; }
     .twin-bar-wrap { height: 5px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; min-width: 40px; }
     .twin-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
     .twin-val { text-align: right; font-weight: 600; font-size: 0.72rem; white-space: nowrap; }
     .twin-val-sub { color: var(--text-muted); font-size: 0.65rem; font-weight: 400; margin-left: 3px; white-space: nowrap; }
+    .twin-reset-line { display: flex; justify-content: space-between; align-items: center; font-family: var(--font-mono); font-size: 0.63rem; color: var(--text-muted); padding: 0 1px; letter-spacing: -0.01em; line-height: 1.15; }
+    .reset-time-val { color: #d4d4d8; font-weight: 600; }
+    .reset-time-val.exhausted { color: var(--red); }
+    .reset-rel { color: #71717a; font-size: 0.60rem; margin-left: 2px; }
     
-    .meta-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-muted); margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.04); font-family: var(--font-mono); }
+    .meta-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-muted); margin-top: 7px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.04); font-family: var(--font-mono); }
 
     /* Account Pagination Bar */
     .account-pagination { display: flex; justify-content: space-between; align-items: center; padding: 10px 4px 20px 4px; font-size: 0.76rem; color: var(--text-muted); font-family: var(--font-mono); }
@@ -1128,6 +1144,40 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       return `Resets in ${hours}h ${mins}m`;
     }
 
+    function formatResetTime(isoString) {
+      if (!isoString) return { exact: "Ready", rel: "", full: "Ready (Full quota available)", isReady: true };
+      const d = new Date(isoString);
+      if (isNaN(d.getTime())) return { exact: "Ready", rel: "", full: "Ready", isReady: true };
+      const diff = d.getTime() - Date.now();
+      if (diff <= 0) return { exact: "Ready", rel: "Now", full: "Quota reset has arrived", isReady: true };
+
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mo = String(d.getMonth() + 1).padStart(2, '0');
+      const yyyy = d.getFullYear();
+
+      const hours = Math.floor(diff / (1000 * 60 * 60));
+      const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      let rel = "";
+      if (hours >= 24) {
+        const days = Math.floor(hours / 24);
+        const remH = hours % 24;
+        rel = `${days}d ${remH}h`;
+      } else if (hours > 0) {
+        rel = `${hours}h ${mins}m`;
+      } else {
+        rel = `${mins}m`;
+      }
+
+      const now = new Date();
+      const isToday = d.toDateString() === now.toDateString();
+      const exact = isToday ? `${hh}:${mm}` : `${dd}/${mo} ${hh}:${mm}`;
+      const full = `${hh}:${mm} · ${dd}/${mo}/${yyyy} (in ${rel})`;
+
+      return { exact, rel, full, isToday, isReady: false };
+    }
+
     function getBarColor(pct, defaultColor) {
       if (pct < 15) return 'var(--red)';
       if (pct < 45) return 'var(--yellow)';
@@ -1287,6 +1337,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         nameDisplay,
         g5h, gWeekly, c5h, cWeekly,
         gWeeklyExhausted, cWeeklyExhausted,
+        g5hExhausted, c5hExhausted,
         g5hEffectivePct, c5hEffectivePct,
         isGeminiHealthy, isClaudeHealthy,
         badgeClass, badgeText,
@@ -1365,13 +1416,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
 
       for (const item of items) {
-        const { name, acc, emailDisplay, nameDisplay, badgeClass, badgeText, isGeminiHealthy, isClaudeHealthy, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct } = item;
+        const { name, acc, emailDisplay, nameDisplay, badgeClass, badgeText, isGeminiHealthy, isClaudeHealthy, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct, g5hExhausted, c5hExhausted } = item;
         const g5hColor = getBarColor(g5hEffectivePct, 'var(--accent)');
         const c5hColor = getBarColor(c5hEffectivePct, 'var(--purple)');
-        const gWkTime = formatTimeUntil(gWeekly.reset_time);
-        const cWkTime = formatTimeUntil(cWeekly.reset_time);
-        const g5hTime = formatTimeUntil(g5h.reset_time);
-        const c5hTime = formatTimeUntil(c5h.reset_time);
+        const g5hInfo = formatResetTime(g5h.reset_time);
+        const gWkInfo = formatResetTime(gWeekly.reset_time);
+        const c5hInfo = formatResetTime(c5h.reset_time);
+        const cWkInfo = formatResetTime(cWeekly.reset_time);
 
         const card = document.createElement('div');
         card.className = 'card';
@@ -1389,29 +1440,41 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <div class="badge ${badgeClass}">${badgeText}</div>
           </div>
 
-          <!-- Dual Inline Quota Box (Primary 5H Progress Bar) -->
+          <!-- Dual Inline Quota Box (Primary 5H Progress Bar & Reset Times) -->
           <div class="quota-twin-box">
-            <!-- Row 1: Gemini -->
-            <div class="twin-row" title="Gemini 5h: ${Number(g5hEffectivePct).toFixed(1)}% | Weekly: ${Number(gWeekly.percent).toFixed(1)}% (${gWkTime})">
-              <span class="twin-label" style="color:var(--accent);">Gemini</span>
-              <div class="twin-bar-wrap">
-                <div class="twin-bar-fill" style="width: ${g5hEffectivePct}%; background: ${g5hColor};"></div>
+            <!-- Block 1: Gemini -->
+            <div class="twin-block" title="Gemini Quota&#10;5h: ${Number(g5hEffectivePct).toFixed(1)}% (Reset: ${g5hInfo.full})&#10;Weekly: ${Number(gWeekly.percent).toFixed(1)}% (Reset: ${gWkInfo.full})">
+              <div class="twin-row">
+                <span class="twin-label" style="color:var(--accent);">Gemini</span>
+                <div class="twin-bar-wrap">
+                  <div class="twin-bar-fill" style="width: ${g5hEffectivePct}%; background: ${g5hColor};"></div>
+                </div>
+                <div class="twin-val" style="color:${g5hColor};">
+                  ${gWeeklyExhausted ? '<span style="color:var(--red);">0%</span>' : (g5h.percent <= 5.0 && g5h.reset_time ? '<span style="color:var(--red);">≤5%</span>' : Number(g5hEffectivePct).toFixed(0) + '%')}
+                  <span class="twin-val-sub" style="color:${gWeeklyExhausted ? 'var(--red)' : 'var(--text-muted)'};">(Wk: ${gWeeklyExhausted ? '≤5%' : Number(gWeekly.percent).toFixed(0) + '%'})</span>
+                </div>
               </div>
-              <div class="twin-val" style="color:${g5hColor};">
-                ${gWeeklyExhausted ? '<span style="color:var(--red);">0%</span>' : (g5h.percent <= 5.0 && g5h.reset_time ? '<span style="color:var(--red);">≤5%</span>' : Number(g5hEffectivePct).toFixed(0) + '%')}
-                <span class="twin-val-sub" style="color:${gWeeklyExhausted ? 'var(--red)' : 'var(--text-muted)'};">(Wk: ${gWeeklyExhausted ? '≤5%' : Number(gWeekly.percent).toFixed(0) + '%'})</span>
+              <div class="twin-reset-line">
+                <span title="Gemini 5h Reset: ${g5hInfo.full}">5h: <b class="reset-time-val ${g5hExhausted ? 'exhausted' : ''}">${g5hInfo.exact}</b>${g5hInfo.rel ? ` <span class="reset-rel">(${g5hInfo.rel})</span>` : ''}</span>
+                <span title="Gemini Weekly Reset: ${gWkInfo.full}">Wk: <b class="reset-time-val ${gWeeklyExhausted ? 'exhausted' : ''}">${gWkInfo.exact}</b>${gWkInfo.rel ? ` <span class="reset-rel">(${gWkInfo.rel})</span>` : ''}</span>
               </div>
             </div>
 
-            <!-- Row 2: Claude / GPT -->
-            <div class="twin-row" title="Claude & GPT 5h: ${Number(c5hEffectivePct).toFixed(1)}% | Weekly: ${Number(cWeekly.percent).toFixed(1)}% (${cWkTime})">
-              <span class="twin-label" style="color:var(--purple);">Claude/GPT</span>
-              <div class="twin-bar-wrap">
-                <div class="twin-bar-fill" style="width: ${c5hEffectivePct}%; background: ${c5hColor};"></div>
+            <!-- Block 2: Claude / GPT -->
+            <div class="twin-block" title="Claude & GPT Quota&#10;5h: ${Number(c5hEffectivePct).toFixed(1)}% (Reset: ${c5hInfo.full})&#10;Weekly: ${Number(cWeekly.percent).toFixed(1)}% (Reset: ${cWkInfo.full})">
+              <div class="twin-row">
+                <span class="twin-label" style="color:var(--purple);">Claude/GPT</span>
+                <div class="twin-bar-wrap">
+                  <div class="twin-bar-fill" style="width: ${c5hEffectivePct}%; background: ${c5hColor};"></div>
+                </div>
+                <div class="twin-val" style="color:${c5hColor};">
+                  ${cWeeklyExhausted ? '<span style="color:var(--red);">0%</span>' : (c5h.percent <= 5.0 && c5h.reset_time ? '<span style="color:var(--red);">≤5%</span>' : Number(c5hEffectivePct).toFixed(0) + '%')}
+                  <span class="twin-val-sub" style="color:${cWeeklyExhausted ? 'var(--red)' : 'var(--text-muted)'};">(Wk: ${cWeeklyExhausted ? '≤5%' : Number(cWeekly.percent).toFixed(0) + '%'})</span>
+                </div>
               </div>
-              <div class="twin-val" style="color:${c5hColor};">
-                ${cWeeklyExhausted ? '<span style="color:var(--red);">0%</span>' : (c5h.percent <= 5.0 && c5h.reset_time ? '<span style="color:var(--red);">≤5%</span>' : Number(c5hEffectivePct).toFixed(0) + '%')}
-                <span class="twin-val-sub" style="color:${cWeeklyExhausted ? 'var(--red)' : 'var(--text-muted)'};">(Wk: ${cWeeklyExhausted ? '≤5%' : Number(cWeekly.percent).toFixed(0) + '%'})</span>
+              <div class="twin-reset-line">
+                <span title="Claude 5h Reset: ${c5hInfo.full}">5h: <b class="reset-time-val ${c5hExhausted ? 'exhausted' : ''}">${c5hInfo.exact}</b>${c5hInfo.rel ? ` <span class="reset-rel">(${c5hInfo.rel})</span>` : ''}</span>
+                <span title="Claude Weekly Reset: ${cWkInfo.full}">Wk: <b class="reset-time-val ${cWeeklyExhausted ? 'exhausted' : ''}">${cWkInfo.exact}</b>${cWkInfo.rel ? ` <span class="reset-rel">(${cWkInfo.rel})</span>` : ''}</span>
               </div>
             </div>
           </div>
@@ -1450,8 +1513,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         
         const g5hColor = getBarColor(g5hEffectivePct, 'var(--accent)');
         const c5hColor = getBarColor(c5hEffectivePct, 'var(--purple)');
-        const gWkTime = formatTimeUntil(gWeekly.reset_time);
-        const cWkTime = formatTimeUntil(cWeekly.reset_time);
+        const g5hInfo = formatResetTime(g5h.reset_time);
+        const gWkInfo = formatResetTime(gWeekly.reset_time);
+        const c5hInfo = formatResetTime(c5h.reset_time);
+        const cWkInfo = formatResetTime(cWeekly.reset_time);
 
         tr.innerHTML = `
           <td>
@@ -1465,22 +1530,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <span class="badge ${badgeClass}">${badgeText}</span>
           </td>
           <td>
-            <div class="bar-compact-wrap" title="5h: ${Number(g5hEffectivePct).toFixed(1)}% | Weekly: ${Number(gWeekly.percent).toFixed(1)}%">
+            <div class="bar-compact-wrap" title="Gemini 5h: ${Number(g5hEffectivePct).toFixed(1)}% (Reset: ${g5hInfo.full}) | Weekly: ${Number(gWeekly.percent).toFixed(1)}% (Reset: ${gWkInfo.full})">
               <div class="bar-compact">
                 <div class="bar-compact-fill" style="width:${g5hEffectivePct}%; background:${g5hColor};"></div>
               </div>
               <span style="font-weight:600; font-size:0.76rem; width:46px; text-align:right;">${Number(g5hEffectivePct).toFixed(1)}%</span>
             </div>
-            <span class="sub-tag">Wk: <b>${gWeeklyExhausted ? 'Exhausted' : Number(gWeekly.percent).toFixed(1) + '%'}</b> · <span class="tooltip-anchor" title="${gWkTime}">${gWkTime}</span></span>
+            <span class="sub-tag" style="display:flex; justify-content:space-between; gap:6px;">
+              <span>Wk: <b>${gWeeklyExhausted ? 'Exhausted' : Number(gWeekly.percent).toFixed(1) + '%'}</b></span>
+              <span class="tooltip-anchor" title="Gemini 5h: ${g5hInfo.full} | Weekly: ${gWkInfo.full}">5h: ${g5hInfo.exact} · Wk: ${gWkInfo.exact}</span>
+            </span>
           </td>
           <td>
-            <div class="bar-compact-wrap" title="5h: ${Number(c5hEffectivePct).toFixed(1)}% | Weekly: ${Number(cWeekly.percent).toFixed(1)}%">
+            <div class="bar-compact-wrap" title="Claude 5h: ${Number(c5hEffectivePct).toFixed(1)}% (Reset: ${c5hInfo.full}) | Weekly: ${Number(cWeekly.percent).toFixed(1)}% (Reset: ${cWkInfo.full})">
               <div class="bar-compact">
                 <div class="bar-compact-fill" style="width:${c5hEffectivePct}%; background:${c5hColor};"></div>
               </div>
               <span style="font-weight:600; font-size:0.76rem; width:46px; text-align:right;">${cWeeklyExhausted ? '0.0%' : Number(c5hEffectivePct).toFixed(1) + '%'}</span>
             </div>
-            <span class="sub-tag">Wk: <b>${cWeeklyExhausted ? 'Exhausted' : Number(cWeekly.percent).toFixed(1) + '%'}</b> · <span class="tooltip-anchor" title="${cWkTime}">${cWkTime}</span></span>
+            <span class="sub-tag" style="display:flex; justify-content:space-between; gap:6px;">
+              <span>Wk: <b>${cWeeklyExhausted ? 'Exhausted' : Number(cWeekly.percent).toFixed(1) + '%'}</b></span>
+              <span class="tooltip-anchor" title="Claude 5h: ${c5hInfo.full} | Weekly: ${cWkInfo.full}">5h: ${c5hInfo.exact} · Wk: ${cWkInfo.exact}</span>
+            </span>
           </td>
           <td style="text-align:right;">
             <div style="display:inline-flex; align-items:center; gap:10px;">
