@@ -9,7 +9,7 @@ import sys
 import time
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
@@ -210,7 +210,7 @@ async def get_logs(
 
 
 @app.get("/api/analytics/tokens")
-async def get_token_analytics(range_days: int = 7):
+async def get_token_analytics(range_days: int = Query(default=7, ge=1, le=90)):
     telemetry_db = get_telemetry_db()
     return await asyncio.to_thread(telemetry_db.query_token_analytics, range_days=range_days)
 
@@ -766,6 +766,53 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .btn-inspect { background: #18181b; border: 1px solid var(--border); color: #d4d4d8; padding: 4px 10px; border-radius: 6px; font-size: 0.74rem; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
     .btn-inspect:hover { background: #27272a; color: #fff; border-color: #3f3f46; }
 
+    /* Daily Token Analytics Component */
+    .analytics-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 24px; overflow: hidden; transition: border-color 0.2s; }
+    .analytics-card:hover { border-color: var(--border-hover); }
+    .analytics-header { padding: 12px 18px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; background: #111114; }
+    .analytics-title { font-size: 0.92rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; font-family: var(--font-sans); }
+    .analytics-badge { font-size: 0.68rem; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.25); color: var(--accent); padding: 2px 7px; border-radius: 12px; font-family: var(--font-mono); font-weight: 600; }
+    .analytics-controls { display: flex; align-items: center; gap: 8px; }
+    .range-selector { display: inline-flex; background: #08080a; border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+    .range-btn { background: transparent; border: none; color: var(--text-muted); padding: 4px 10px; font-size: 0.74rem; font-weight: 600; border-radius: 4px; cursor: pointer; transition: all 0.15s; font-family: var(--font-mono); height: 26px; }
+    .range-btn.active { background: #222228; color: #fff; }
+    .range-btn:hover:not(.active) { color: #d4d4d8; }
+    .collapse-btn { background: #0c0c0e; border: 1px solid var(--border); color: var(--text-muted); width: 28px; height: 28px; padding: 0; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s; }
+    .collapse-btn:hover { background: #18181b; color: #fff; }
+    .collapse-btn svg { transition: transform 0.2s ease; }
+    .collapse-btn.collapsed svg { transform: rotate(-90deg); }
+
+    .analytics-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 16px; }
+    .analytics-body.collapsed { display: none; }
+
+    .chart-container { background: #08080a; border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+    .chart-legend { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 0.74rem; font-family: var(--font-mono); color: var(--text-muted); }
+    .legend-items { display: flex; gap: 16px; align-items: center; }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+    .legend-dot.prompt { background: var(--accent); }
+    .legend-dot.completion { background: var(--purple); }
+
+    .bars-wrapper { display: flex; align-items: flex-end; gap: 10px; height: 140px; padding: 10px 4px 0 4px; border-bottom: 1px solid var(--border); position: relative; overflow-x: auto; }
+    .bar-col { flex: 1; min-width: 24px; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; position: relative; cursor: pointer; }
+    .bar-col:hover .bar-stack { filter: brightness(1.2); }
+    .bar-col:hover .bar-tooltip { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(-8px); }
+    .bar-val-top { font-size: 0.65rem; font-family: var(--font-mono); color: var(--text-muted); margin-bottom: 4px; white-space: nowrap; font-weight: 500; }
+    .bar-stack { width: 100%; max-width: 38px; background: rgba(255, 255, 255, 0.03); border-radius: 4px 4px 0 0; overflow: hidden; display: flex; flex-direction: column-reverse; transition: height 0.3s cubic-bezier(0.16, 1, 0.3, 1), filter 0.15s; min-height: 2px; }
+    .bar-seg-prompt { background: var(--accent); width: 100%; transition: height 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+    .bar-seg-completion { background: var(--purple); width: 100%; transition: height 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+    .bar-label-bot { font-size: 0.68rem; font-family: var(--font-mono); color: var(--text-muted); margin-top: 6px; white-space: nowrap; }
+    .bar-label-bot.is-today { color: #fff; font-weight: 700; }
+
+    .bar-tooltip { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%) translateY(0); background: #141418; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 0.72rem; font-family: var(--font-mono); white-space: nowrap; z-index: 50; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 0.15s ease, transform 0.15s ease; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.6); display: flex; flex-direction: column; gap: 3px; }
+    .bar-tooltip-title { font-weight: 700; color: #fff; border-bottom: 1px solid rgba(255, 255, 255, 0.08); padding-bottom: 3px; margin-bottom: 2px; }
+
+    .daily-table-wrap { overflow-x: auto; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.05); }
+    .daily-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.78rem; }
+    .daily-table th { color: var(--text-muted); padding: 8px 12px; border-bottom: 1px solid var(--border); background: #0f0f12; font-weight: 600; font-family: var(--font-sans); }
+    .daily-table td { padding: 8px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); vertical-align: middle; font-family: var(--font-mono); }
+    .daily-table tr:hover { background: rgba(255, 255, 255, 0.02); }
+
     /* Modal Dialog */
     .modal-backdrop { 
       position: fixed; 
@@ -952,6 +999,62 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Daily Token Breakdown & Analytics Section -->
+  <div class="analytics-card" id="analyticsCard">
+    <div class="analytics-header">
+      <div class="analytics-title">
+        <svg class="btn-svg" viewBox="0 0 24 24" style="color:var(--accent);"><rect x="3" y="12" width="4" height="9" rx="1"/><rect x="10" y="7" width="4" height="14" rx="1"/><rect x="17" y="3" width="4" height="18" rx="1"/></svg>
+        <span>Daily Token Consumption</span>
+        <span class="analytics-badge" id="analyticsRangeSummary">Last 7 Days</span>
+      </div>
+      <div class="analytics-controls">
+        <div class="range-selector">
+          <button class="range-btn active" onclick="setTokenRange(7, this)">7 Days</button>
+          <button class="range-btn" onclick="setTokenRange(14, this)">14 Days</button>
+          <button class="range-btn" onclick="setTokenRange(30, this)">30 Days</button>
+        </div>
+        <button class="collapse-btn" id="btnToggleAnalytics" onclick="toggleAnalyticsCollapse()" title="Collapse / Expand">
+          <svg class="btn-svg" id="collapseSvg" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="analytics-body" id="analyticsBody">
+      <div class="chart-container">
+        <div class="chart-legend">
+          <div class="legend-items">
+            <span class="legend-item"><span class="legend-dot prompt"></span> Prompt (Input)</span>
+            <span class="legend-item"><span class="legend-dot completion"></span> Completion (Output)</span>
+          </div>
+          <div class="chart-summary-stat" id="chartSummaryStat">
+            Period Total: <b id="periodTotalTokens" style="color:var(--accent);">0 tok</b> · <span id="periodTotalReqs">0 reqs</span>
+          </div>
+        </div>
+        <div class="bars-wrapper" id="barsWrapper">
+          <div style="width:100%; text-align:center; color:var(--text-muted); font-size:0.75rem; padding-top:40px;">Loading daily token metrics...</div>
+        </div>
+      </div>
+
+      <div class="daily-table-wrap">
+        <table class="daily-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Requests</th>
+              <th>Input (Prompt)</th>
+              <th>Output (Completion)</th>
+              <th>Total Tokens</th>
+              <th>Avg / Req</th>
+            </tr>
+          </thead>
+          <tbody id="dailyTableBody">
+            <tr><td colspan="6" style="text-align:center; padding:18px; color:var(--text-muted);">Loading daily breakdown...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <!-- Account Management Section Header -->
   <div class="section-header">
     <div class="section-title">
@@ -1126,6 +1229,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
     function syntaxHighlightJson(jsonObj) {
       if (typeof jsonObj !== 'string') {
         jsonObj = JSON.stringify(jsonObj, null, 2);
@@ -1245,6 +1358,135 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       renderAccounts(accountsCache);
     }
 
+    let currentTokenRangeDays = 7;
+    let isAnalyticsCollapsed = localStorage.getItem('agy_analytics_collapsed') === 'true';
+
+    function toggleAnalyticsCollapse() {
+      isAnalyticsCollapsed = !isAnalyticsCollapsed;
+      localStorage.setItem('agy_analytics_collapsed', isAnalyticsCollapsed);
+      updateAnalyticsCollapseUI();
+    }
+
+    function updateAnalyticsCollapseUI() {
+      const body = document.getElementById('analyticsBody');
+      const btn = document.getElementById('btnToggleAnalytics');
+      if (!body || !btn) return;
+      if (isAnalyticsCollapsed) {
+        body.classList.add('collapsed');
+        btn.classList.add('collapsed');
+      } else {
+        body.classList.remove('collapsed');
+        btn.classList.remove('collapsed');
+      }
+    }
+
+    async function setTokenRange(days, btn) {
+      currentTokenRangeDays = days;
+      document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      const badge = document.getElementById('analyticsRangeSummary');
+      if (badge) badge.innerText = `Last ${days} Days`;
+      await fetchTokenAnalytics();
+    }
+
+    async function fetchTokenAnalytics() {
+      try {
+        const res = await fetch(`/api/analytics/tokens?range_days=${currentTokenRangeDays}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        renderTokenAnalytics(data);
+      } catch (err) {
+        console.warn("fetchTokenAnalytics error:", err);
+      }
+    }
+
+    function renderTokenAnalytics(data) {
+      const timeline = data.timeline || [];
+      const summary = data.summary || {};
+
+      const elPeriodTok = document.getElementById('periodTotalTokens');
+      const elPeriodReq = document.getElementById('periodTotalReqs');
+      if (elPeriodTok) elPeriodTok.innerText = `${formatTokenCount(summary.total_tokens || 0)} tok`;
+      if (elPeriodReq) elPeriodReq.innerText = `${(summary.requests || 0).toLocaleString()} reqs`;
+
+      const barsWrapper = document.getElementById('barsWrapper');
+      if (barsWrapper) {
+        barsWrapper.innerHTML = '';
+        const _now = new Date();
+        const todayStr = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}-${String(_now.getDate()).padStart(2, '0')}`;
+
+        timeline.forEach(d => {
+          const tot = d.total_tokens || 0;
+          const prompt = d.prompt_tokens || 0;
+          const compl = d.completion_tokens || 0;
+          const reqs = d.requests || 0;
+
+          const totalHeightPct = tot > 0 ? Math.max(8, Math.round((tot / maxTokens) * 100)) : 2;
+          const promptRatio = tot > 0 ? (prompt / tot) : 0.5;
+          const complRatio = tot > 0 ? (compl / tot) : 0.5;
+
+          const isToday = d.date === todayStr;
+          const dateParts = d.date.split('-');
+          const shortDate = isToday ? 'Today' : `${dateParts[1]}/${dateParts[2]}`;
+
+          const col = document.createElement('div');
+          col.className = 'bar-col';
+
+          const promptPctLabel = tot > 0 ? Math.round(promptRatio * 100) : 0;
+          const complPctLabel = tot > 0 ? Math.round(complRatio * 100) : 0;
+
+          col.innerHTML = `
+            <div class="bar-val-top">${tot > 0 ? formatTokenCount(tot) : ''}</div>
+            <div class="bar-stack" style="height: ${totalHeightPct}%;">
+              <div class="bar-seg-prompt" style="height: ${tot > 0 ? Math.round(promptRatio * 100) : 0}%;"></div>
+              <div class="bar-seg-completion" style="height: ${tot > 0 ? Math.round(complRatio * 100) : 0}%;"></div>
+            </div>
+            <div class="bar-label-bot ${isToday ? 'is-today' : ''}">${shortDate}</div>
+            <div class="bar-tooltip">
+              <div class="bar-tooltip-title">${d.date} ${isToday ? '(Today)' : ''}</div>
+              <div>Total: <b style="color:#fff;">${tot.toLocaleString()}</b> tokens (${reqs} reqs)</div>
+              <div>Input: <b style="color:var(--accent);">${prompt.toLocaleString()}</b> (${promptPctLabel}%)</div>
+              <div>Output: <b style="color:var(--purple);">${compl.toLocaleString()}</b> (${complPctLabel}%)</div>
+              ${reqs > 0 ? `<div style="color:var(--text-muted); font-size:0.68rem; margin-top:2px;">Avg: ${Math.round(tot / reqs).toLocaleString()} tok/req</div>` : ''}
+            </div>
+          `;
+          barsWrapper.appendChild(col);
+        });
+      }
+
+      const tbody = document.getElementById('dailyTableBody');
+      if (tbody) {
+        tbody.innerHTML = '';
+        const reversed = [...timeline].reverse();
+        const activeRows = reversed.filter(d => (d.requests > 0 || d.total_tokens > 0));
+
+        if (activeRows.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:18px; color:var(--text-muted);">No token consumption recorded in this period yet.</td></tr>`;
+        } else {
+          activeRows.forEach(d => {
+            const tot = d.total_tokens || 0;
+            const prompt = d.prompt_tokens || 0;
+            const compl = d.completion_tokens || 0;
+            const reqs = d.requests || 0;
+            const avg = reqs > 0 ? Math.round(tot / reqs) : 0;
+            const promptPct = tot > 0 ? Math.round((prompt / tot) * 100) : 0;
+            const complPct = tot > 0 ? Math.round((compl / tot) * 100) : 0;
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td><b style="color:#fff;">${d.date}</b></td>
+              <td>${reqs.toLocaleString()} reqs</td>
+              <td><span style="color:var(--accent); font-weight:600;">${prompt.toLocaleString()}</span> <span style="color:var(--text-muted); font-size:0.7rem;">(${promptPct}%)</span></td>
+              <td><span style="color:var(--purple); font-weight:600;">${compl.toLocaleString()}</span> <span style="color:var(--text-muted); font-size:0.7rem;">(${complPct}%)</span></td>
+              <td><b style="color:#fff;">${tot.toLocaleString()}</b></td>
+              <td style="color:var(--text-muted);">${avg.toLocaleString()} tok</td>
+            `;
+            tbody.appendChild(tr);
+          });
+        }
+      }
+    }
+
     async function fetchStatus(btn = null) {
       const doFetch = async () => {
         const res = await fetch('/api/status');
@@ -1252,6 +1494,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         accountsCache = data.accounts || {};
         renderAccounts(accountsCache);
         updateKPIs(data);
+        await fetchTokenAnalytics();
       };
       if (btn) await handleActionWithButton(btn, doFetch);
       else await doFetch();
@@ -1759,18 +2002,29 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         tokenBadge = ` <span class="code-chip" style="color:var(--accent); font-weight:700; border-color:rgba(59,130,246,0.3); background:rgba(59,130,246,0.1); margin-left:4px;">${formatTokenCount(evt.tokens.total)} tok</span>`;
       }
 
+      const safeTime = escapeHtml(evt.time || '');
+      const safeMethod = escapeHtml(evt.method || 'GET');
+      const safeModel = escapeHtml(modelLabel);
+      const safePath = escapeHtml(evt.path || '/');
+      const safeShortPath = escapeHtml(evt.path && evt.path.length > 28 ? evt.path.substring(0, 28) + '...' : (evt.path || '/'));
+      const safeAccount = escapeHtml(evt.account || '');
+      const safeStatusText = escapeHtml(evt.status_text || String(evt.status || 200));
+      const safeLatency = escapeHtml(String(evt.latency_ms || 0));
+      const safeId = escapeHtml(String(evt.id || ''));
+      const safeSizeLabel = escapeHtml(sizeLabel);
+
       row.innerHTML = `
-        <td style="color:var(--text-muted); font-size:0.75rem;">${evt.time}</td>
-        <td><span class="pill ${methodClass}">${evt.method}</span></td>
-        <td><span class="code-chip" style="color:var(--accent); font-weight:600;">${modelLabel}</span></td>
-        <td><span class="code-chip" title="${evt.path}">${evt.path.length > 28 ? evt.path.substring(0,28)+'...' : evt.path}</span></td>
-        <td><b style="color:#fff;">${evt.account}</b></td>
-        <td><b style="color: ${statusColor};">${evt.status_text || evt.status}</b></td>
-        <td style="color:var(--text-muted);">${evt.latency_ms}ms</td>
+        <td style="color:var(--text-muted); font-size:0.75rem;">${safeTime}</td>
+        <td><span class="pill ${methodClass}">${safeMethod}</span></td>
+        <td><span class="code-chip" style="color:var(--accent); font-weight:600;">${safeModel}</span></td>
+        <td><span class="code-chip" title="${safePath}">${safeShortPath}</span></td>
+        <td><b style="color:#fff;">${safeAccount}</b></td>
+        <td><b style="color: ${statusColor};">${safeStatusText}</b></td>
+        <td style="color:var(--text-muted);">${safeLatency}ms</td>
         <td style="white-space:nowrap;">
-          <button class="btn-inspect" onclick="openPayloadModal('${evt.id}')">
+          <button class="btn-inspect" onclick="openPayloadModal('${safeId}')">
             <svg class="btn-svg" style="width:13px; height:13px;" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            <span>Inspect (${sizeLabel})</span>
+            <span>Inspect (${safeSizeLabel})</span>
           </button>
           ${tokenBadge}
         </td>
@@ -1781,6 +2035,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       } else {
         tbody.appendChild(row);
       }
+      if (tbody.children.length > 300) {
+        const last = tbody.lastElementChild;
+        if (last && last.id) {
+          const oldId = last.id.replace('row-', '');
+          renderedIds.delete(oldId);
+          logDataMap.delete(oldId);
+        }
+        if (last) last.remove();
+      }
       applyFilters();
     }
 
@@ -1790,9 +2053,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       currentModalEvt = evt;
 
       document.getElementById('modalTitle').innerHTML = `
-        <span class="pill ${(evt.method||'POST').toLowerCase()}">${evt.method}</span>
-        <span style="color:var(--accent);">${evt.model || 'API'}</span> &bull;
-        <span style="color:var(--text-muted); font-size:0.85rem;">${evt.path}</span>
+        <span class="pill ${escapeHtml((evt.method||'POST').toLowerCase())}">${escapeHtml(evt.method)}</span>
+        <span style="color:var(--accent);">${escapeHtml(evt.model || 'API')}</span> &bull;
+        <span style="color:var(--text-muted); font-size:0.85rem;">${escapeHtml(evt.path)}</span>
       `;
       let statusColor = evt.status >= 400 ? 'var(--red)' : 'var(--green)';
       if (evt.status === 429) statusColor = 'var(--yellow)';
@@ -1803,14 +2066,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
 
       document.getElementById('modalMeta').innerHTML = `
-        Account: <b style="color:var(--accent);">${evt.account}</b> &bull; 
-        Status: <b style="color:${statusColor}">${evt.status_text || evt.status}</b> &bull; 
-        Latency: <b>${evt.latency_ms}ms</b>${tokenMeta} &bull; Time: <b>${evt.time}</b>
+        Account: <b style="color:var(--accent);">${escapeHtml(evt.account)}</b> &bull; 
+        Status: <b style="color:${statusColor}">${escapeHtml(evt.status_text || String(evt.status))}</b> &bull; 
+        Latency: <b>${escapeHtml(String(evt.latency_ms))}ms</b>${tokenMeta} &bull; Time: <b>${escapeHtml(evt.time)}</b>
       `;
       document.getElementById('modalHeaderFlow').innerHTML = `
-        <div style="margin-bottom:6px;"><span style="color:var(--text-muted);">Your Token:</span> <span class="code-chip">${evt.inbound_token}</span></div>
-        <div style="margin-bottom:6px;"><span style="color:var(--accent);">➔ Selected Account:</span> <b style="color:#fff;">${evt.account}</b></div>
-        <div><span style="color:var(--accent);">➔ Google Token:</span> <span class="code-chip">${evt.overridden_token}</span></div>
+        <div style="margin-bottom:6px;"><span style="color:var(--text-muted);">Your Token:</span> <span class="code-chip">${escapeHtml(evt.inbound_token)}</span></div>
+        <div style="margin-bottom:6px;"><span style="color:var(--accent);">➔ Selected Account:</span> <b style="color:#fff;">${escapeHtml(evt.account)}</b></div>
+        <div><span style="color:var(--accent);">➔ Google Token:</span> <span class="code-chip">${escapeHtml(evt.overridden_token)}</span></div>
       `;
 
       // Tab 1: Request
@@ -1820,7 +2083,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           const parsed = JSON.parse(evt.body);
           reqHtml = syntaxHighlightJson(parsed);
         } catch (e) {
-          reqHtml = `<span class="json-string">${evt.body}</span>`;
+          reqHtml = `<span class="json-string">${escapeHtml(evt.body)}</span>`;
         }
       }
       document.getElementById('modalJsonContainer').innerHTML = reqHtml;
@@ -1832,7 +2095,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           const parsed = JSON.parse(evt.response_preview);
           respHtml = syntaxHighlightJson(parsed);
         } catch (e) {
-          respHtml = `<span class="json-string">${evt.response_preview}</span>`;
+          respHtml = `<span class="json-string">${escapeHtml(evt.response_preview)}</span>`;
         }
       }
       document.getElementById('modalRespContainer').innerHTML = respHtml;
@@ -1878,13 +2141,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       });
     }
 
+    let fetchStatusDebounceTimer = null;
+    function scheduleFetchStatus() {
+      if (fetchStatusDebounceTimer) clearTimeout(fetchStatusDebounceTimer);
+      fetchStatusDebounceTimer = setTimeout(() => {
+        fetchStatus();
+      }, 1000);
+    }
+
     function initSSE() {
       try {
         const evtSource = new EventSource('/api/stream');
         evtSource.addEventListener('request', (e) => {
           const data = JSON.parse(e.data);
           appendLogRow(data, true);
-          fetchStatus();
+          scheduleFetchStatus();
         });
         evtSource.onerror = () => {
           document.getElementById('kpiSyncStatus').innerText = 'Reconnecting...';
@@ -1898,6 +2169,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
 
     setAccountView(currentAccountView);
+    updateAnalyticsCollapseUI();
     fetchStatus();
     pollLogs();
     initSSE();

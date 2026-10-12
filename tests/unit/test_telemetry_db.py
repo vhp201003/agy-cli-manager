@@ -174,6 +174,10 @@ def test_query_token_analytics(telemetry_db):
     assert "timeline" in analytics
     assert "by_account" in analytics
     assert "by_model" in analytics
+    assert "summary" in analytics
+    assert analytics["summary"]["total_tokens"] == 450
+    assert analytics["summary"]["requests"] == 2
+    assert len(analytics["timeline"]) == 7
 
     assert len(analytics["by_model"]) == 1
     assert analytics["by_model"][0]["model"] == "gemini-2.5-flash"
@@ -182,6 +186,53 @@ def test_query_token_analytics(telemetry_db):
     accounts = {item["account"]: item["total_tokens"] for item in analytics["by_account"]}
     assert accounts["acc-1"] == 150
     assert accounts["acc-2"] == 300
+
+
+def test_query_token_analytics_empty_and_clamping(telemetry_db):
+    empty_stats = telemetry_db.query_token_analytics(range_days=7)
+    assert empty_stats["summary"]["total_tokens"] == 0
+    assert empty_stats["summary"]["requests"] == 0
+    assert len(empty_stats["timeline"]) == 7
+
+    # Clamping bounds: < 1 should become 1, > 90 should become 90
+    clamped_low = telemetry_db.query_token_analytics(range_days=0)
+    assert len(clamped_low["timeline"]) == 1
+
+    clamped_high = telemetry_db.query_token_analytics(range_days=999)
+    assert len(clamped_high["timeline"]) == 90
+
+
+def test_query_token_analytics_multi_day_alignment(telemetry_db):
+    now = time.time()
+    # Log event today
+    telemetry_db.log_event({
+        "id": "req-today",
+        "created_at": now,
+        "method": "POST",
+        "path": "/today",
+        "account": "acc-today",
+        "model": "gemini-2.5-flash",
+        "status": 200,
+        "tokens": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+    })
+    # Log event 2 days ago
+    telemetry_db.log_event({
+        "id": "req-past",
+        "created_at": now - (2 * 86400),
+        "method": "POST",
+        "path": "/past",
+        "account": "acc-past",
+        "model": "gemini-2.5-flash",
+        "status": 200,
+        "tokens": {"prompt_tokens": 50, "completion_tokens": 50, "total_tokens": 100},
+    })
+    telemetry_db.flush()
+
+    stats_3d = telemetry_db.query_token_analytics(range_days=3)
+    assert len(stats_3d["timeline"]) == 3
+    # Total tokens in 3-day window includes today (150) + 2 days ago (100) = 250
+    assert stats_3d["summary"]["total_tokens"] == 250
+    assert stats_3d["summary"]["requests"] == 2
 
 
 def test_concurrent_writes_no_lock_error(telemetry_db):

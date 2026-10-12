@@ -291,7 +291,15 @@ class TelemetryDB:
         }
 
     def query_token_analytics(self, range_days: int = 7) -> dict[str, Any]:
-        cutoff = time.time() - (range_days * 86400) if range_days > 0 else 0
+        import datetime
+        if range_days is None:
+            range_days = 7
+        range_days = max(1, min(int(range_days), 90))
+        now_dt = datetime.datetime.now()
+        start_dt = (now_dt - datetime.timedelta(days=range_days - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        cutoff = start_dt.timestamp()
 
         with self.get_read_conn() as conn:
             cursor = conn.cursor()
@@ -332,18 +340,43 @@ class TelemetryDB:
                 ORDER BY total_tokens DESC;
             """, (cutoff,)).fetchall()
 
-        return {
-            "range_days": range_days,
-            "timeline": [
-                {
-                    "date": r["day"],
+        date_map = {r["day"]: r for r in timeline_rows}
+        timeline = []
+        for i in range(range_days - 1, -1, -1):
+            day_str = (now_dt - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+            if day_str in date_map:
+                r = date_map[day_str]
+                timeline.append({
+                    "date": day_str,
                     "requests": r["requests"],
                     "prompt_tokens": r["prompt_tokens"],
                     "completion_tokens": r["completion_tokens"],
                     "total_tokens": r["total_tokens"],
-                }
-                for r in timeline_rows
-            ],
+                })
+            else:
+                timeline.append({
+                    "date": day_str,
+                    "requests": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                })
+
+        total_tok = sum(t["total_tokens"] for t in timeline)
+        prompt_tok = sum(t["prompt_tokens"] for t in timeline)
+        compl_tok = sum(t["completion_tokens"] for t in timeline)
+        total_reqs = sum(t["requests"] for t in timeline)
+
+        return {
+            "range_days": range_days,
+            "summary": {
+                "total_tokens": total_tok,
+                "prompt_tokens": prompt_tok,
+                "completion_tokens": compl_tok,
+                "requests": total_reqs,
+                "avg_tokens_per_request": round(total_tok / total_reqs, 1) if total_reqs > 0 else 0,
+            },
+            "timeline": timeline,
             "by_account": [
                 {
                     "account": r["account"],
