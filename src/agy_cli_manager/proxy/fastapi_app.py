@@ -1414,6 +1414,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         barsWrapper.innerHTML = '';
         const _now = new Date();
         const todayStr = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}-${String(_now.getDate()).padStart(2, '0')}`;
+        const maxTokens = Math.max(...timeline.map(d => d.total_tokens || 0), 1);
 
         timeline.forEach(d => {
           const tot = d.total_tokens || 0;
@@ -1427,13 +1428,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
           const isToday = d.date === todayStr;
           const dateParts = d.date.split('-');
-          const shortDate = isToday ? 'Today' : `${dateParts[1]}/${dateParts[2]}`;
+          const shortDate = isToday ? 'Today' : (dateParts.length >= 3 ? `${dateParts[1]}/${dateParts[2]}` : d.date);
 
           const col = document.createElement('div');
           col.className = 'bar-col';
 
           const promptPctLabel = tot > 0 ? Math.round(promptRatio * 100) : 0;
-          const complPctLabel = tot > 0 ? Math.round(complRatio * 100) : 0;
+          const complPctLabel = tot > 0 ? (compl > 0 && Math.round(complRatio * 100) === 0 ? '<1' : Math.round(complRatio * 100)) : 0;
 
           col.innerHTML = `
             <div class="bar-val-top">${tot > 0 ? formatTokenCount(tot) : ''}</div>
@@ -1470,7 +1471,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             const reqs = d.requests || 0;
             const avg = reqs > 0 ? Math.round(tot / reqs) : 0;
             const promptPct = tot > 0 ? Math.round((prompt / tot) * 100) : 0;
-            const complPct = tot > 0 ? Math.round((compl / tot) * 100) : 0;
+            const complPct = tot > 0 ? (compl > 0 && Math.round((compl / tot) * 100) === 0 ? '<1' : Math.round((compl / tot) * 100)) : 0;
 
             const tr = document.createElement('tr');
             tr.innerHTML = `

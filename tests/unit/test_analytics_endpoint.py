@@ -12,6 +12,8 @@ def test_dashboard_contains_daily_analytics_ui():
     assert "dailyTableBody" in html
     assert "analyticsCard" in html
     assert "range-selector" in html
+    assert "const maxTokens = Math.max" in html
+    assert "totalHeightPct" in html
 
 
 def test_analytics_tokens_endpoint():
