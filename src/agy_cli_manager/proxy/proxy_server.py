@@ -669,7 +669,12 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
 
 
-def start_proxy_server(port: int = 8899, token_manager: TokenManager | None = None, cert_manager: CertManager | None = None) -> tuple[ThreadedTCPServer, threading.Thread]:
+def start_proxy_server(
+    host: str = "127.0.0.1",
+    port: int = 8899,
+    token_manager: TokenManager | None = None,
+    cert_manager: CertManager | None = None,
+) -> tuple[ThreadedTCPServer, threading.Thread]:
     cm = cert_manager or CertManager()
     tm = token_manager or TokenManager()
 
@@ -677,11 +682,11 @@ def start_proxy_server(port: int = 8899, token_manager: TokenManager | None = No
     handler_cls.cert_manager = cm
     handler_cls.token_manager = tm
 
-    # Main dispatcher server (port 8899)
-    server = ThreadedTCPServer(("127.0.0.1", port), handler_cls)
+    # Main dispatcher server
+    server = ThreadedTCPServer((host, port), handler_cls)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    logger.info(f"AGY Multi-Account Token Proxy running on http://127.0.0.1:{port}")
+    logger.info(f"AGY Multi-Account Token Proxy running on http://{host}:{port}")
 
     return server, t
 

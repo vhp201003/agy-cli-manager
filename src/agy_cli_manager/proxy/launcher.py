@@ -26,7 +26,8 @@ def run_proxy_service(
 ) -> None:
     cm = CertManager()
     bundle_path = cm.get_ca_bundle_path()
-    cm.install_ca_windows()
+    if os.name == "nt":
+        cm.install_ca_windows()
 
     tm = TokenManager()
     tm.reload_accounts()
@@ -59,9 +60,9 @@ def run_proxy_service(
 
     # Start Proxy Server in background thread sharing the same TokenManager as FastAPI
     from agy_cli_manager.proxy.fastapi_app import tm_instance
-    server, proxy_thr = start_proxy_server(port=proxy_port, token_manager=tm_instance, cert_manager=cm)
+    server, proxy_thr = start_proxy_server(host=proxy_host, port=proxy_port, token_manager=tm_instance, cert_manager=cm)
 
-    if open_browser:
+    if open_browser and (os.name == "nt" or bool(os.environ.get("DISPLAY"))):
         import webbrowser
         def _open():
             time.sleep(1.2)

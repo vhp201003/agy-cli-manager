@@ -200,6 +200,12 @@ class PosixFileCredentialProvider:
         if data:
             return data
 
+        # Fallback: check Windows-synced credential.json
+        cred_json_path = self.accounts_dir / name / ".gemini" / "antigravity-cli" / "credential.json"
+        data = self._read_file_safe(cred_json_path)
+        if data:
+            return data
+
         # Fallback: check legacy flat oauth_creds.json or account root
         fallback_path = self.accounts_dir / name / "oauth_creds.json"
         data = self._read_file_safe(fallback_path)
@@ -210,7 +216,11 @@ class PosixFileCredentialProvider:
 
     def write_account(self, name: str, data: dict) -> bool:
         path = self._account_token_path(name)
-        return self._write_file_atomic(path, data)
+        ok = self._write_file_atomic(path, data)
+        cred_json_path = self.accounts_dir / name / ".gemini" / "antigravity-cli" / "credential.json"
+        if cred_json_path.exists():
+            self._write_file_atomic(cred_json_path, data)
+        return ok
 
     def sync_active(self, name: str, data: dict) -> bool:
         ok = self._write_file_atomic(self.live_token_path, data)

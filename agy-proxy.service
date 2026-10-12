@@ -1,0 +1,18 @@
+[Unit]
+Description=AGY Multi-Account Router & Live Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+# Replace <USER> with your Linux username (e.g. ubuntu, debian, root)
+User=<USER>
+WorkingDirectory=/home/<USER>/agy-cli-manager
+Environment="PATH=/home/<USER>/agy-cli-manager/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/<USER>/agy-cli-manager/.venv/bin/agy-cli-manager proxy --dashboard-host 0.0.0.0 --proxy-host 0.0.0.0 --no-browser
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

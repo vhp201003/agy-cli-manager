@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 from pathlib import Path
 import ssl
 import subprocess
@@ -168,12 +169,17 @@ class CertManager:
         return bundle_path
 
     def install_ca_windows(self) -> bool:
+        if os.name != "nt":
+            return False
         cmd = [
             "powershell",
             "-NoProfile",
             "-Command",
             f"Import-Certificate -FilePath '{self.ca_crt_path}' -CertStoreLocation Cert:\\CurrentUser\\Root | Out-Null; $?",
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return "True" in res.stdout
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            return "True" in res.stdout
+        except Exception:
+            return False
 
