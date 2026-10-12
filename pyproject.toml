@@ -25,6 +25,8 @@ proxy = [
 
 [project.scripts]
 agy-cli-manager = "agy_cli_manager.cli:main"
+agy-server = "agy_cli_manager.cli:server_entrypoint"
+agy-client = "agy_cli_manager.cli:client_entrypoint"
 agy-run = "agy_cli_manager.cli:run_entrypoint"
 
 [tool.setuptools]

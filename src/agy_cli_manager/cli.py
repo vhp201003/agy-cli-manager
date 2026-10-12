@@ -6,6 +6,8 @@ try:
 except ImportError:
     curses = None
 import json
+import os
+import subprocess
 import textwrap
 import sys
 import threading
@@ -19,16 +21,20 @@ from agy_cli_manager.manager import (
     apply_active,
     build_paths,
     clear_bad,
+    connect_gateway,
     default_root,
+    disconnect_gateway,
     ensure_active_account,
     ensure_layout,
     format_status,
     get_account_identity,
     get_account_proxy,
+    get_client_status,
     get_live_dir,
     pick_due_refresh_account,
     get_status_snapshot,
     import_current,
+    is_proxy_available,
     list_account_proxies,
     list_models,
     login_account,
@@ -233,9 +239,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_cmd = sub.add_parser("run", help="Safely run agy via local proxy (with auto-fallback to native agy if proxy is offline)")
     run_cmd.add_argument("--agy-binary", help="Explicit path to agy binary")
-    run_cmd.add_argument("--proxy-host", default="127.0.0.1", help="Proxy host (default: 127.0.0.1)")
-    run_cmd.add_argument("--proxy-port", type=int, default=8899, help="Proxy port (default: 8899)")
+    run_cmd.add_argument("--proxy-host", default=None, help="Proxy host (default: from config or 127.0.0.1)")
+    run_cmd.add_argument("--proxy-port", type=int, default=None, help="Proxy port (default: from config or 8899)")
     run_cmd.add_argument("extra_args", nargs=argparse.REMAINDER, help="Arguments passed through to agy")
+
+    server_cmd = sub.add_parser("server", help="Server and gateway administration commands")
+    server_sub = server_cmd.add_subparsers(dest="server_action")
+    server_start = server_sub.add_parser("start", help="Start proxy gateway and dashboard")
+    server_start.add_argument("--proxy-host", default="0.0.0.0", help="Proxy listen host (default: 0.0.0.0)")
+    server_start.add_argument("--proxy-port", type=int, default=8899, help="Proxy listen port (default: 8899)")
+    server_start.add_argument("--dashboard-host", default="0.0.0.0", help="Dashboard listen host (default: 0.0.0.0)")
+    server_start.add_argument("--dashboard-port", type=int, default=8800, help="Dashboard listen port (default: 8800)")
+    server_start.add_argument("--no-browser", action="store_true", help="Do not open dashboard in web browser")
+    server_status = server_sub.add_parser("status", help="Show server accounts and proxy status")
+    server_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    server_service = server_sub.add_parser("service", help="Show systemd / background service status or template")
+    server_service.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    client_cmd = sub.add_parser("client", help="Client connection and developer environment commands")
+    client_sub = client_cmd.add_subparsers(dest="client_action")
+    client_conn = client_sub.add_parser("connect", help="Connect to an AGY Gateway")
+    client_conn.add_argument("url", help="Gateway URL, e.g. http://<server-ip>:8800")
+    client_conn.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    client_status = client_sub.add_parser("status", help="Show current client connection status and proxy endpoint")
+    client_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    client_disc = client_sub.add_parser("disconnect", help="Disconnect from gateway and revert to local endpoint")
+    client_disc.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    client_sub.add_parser("dashboard", help="Open the connected gateway dashboard in web browser")
+    client_test = client_sub.add_parser("test", help="Test connectivity to the configured proxy endpoint")
+    client_test.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     return parser
 
 
@@ -1815,6 +1848,142 @@ def print_proxy_show(paths, name: str | None, as_json: bool) -> None:
     print(f"proxy_url: {proxy.get('url') or '-'}")
 
 
+def handle_server_service(paths, as_json: bool = False) -> int:
+    service_file = Path("/etc/systemd/system/agy-proxy.service")
+    installed = service_file.is_file()
+    active = False
+    if os.name != "nt":
+        try:
+            res = subprocess.run(["systemctl", "is-active", "agy-proxy"], capture_output=True, text=True, check=False)
+            active = (res.stdout.strip() == "active")
+        except Exception:
+            pass
+
+    unit_template = textwrap.dedent("""\
+        [Unit]
+        Description=Antigravity Proxy Gateway & Account Rotation Service
+        After=network.target
+
+        [Service]
+        Type=simple
+        User=%u
+        WorkingDirectory=/home/%u
+        ExecStart=/home/%u/.venv/bin/agy-cli-manager server start --dashboard-host 0.0.0.0 --proxy-host 0.0.0.0 --no-browser
+        Restart=always
+        RestartSec=3
+
+        [Install]
+        WantedBy=multi-user.target
+    """)
+
+    if as_json:
+        print(json.dumps({
+            "service_name": "agy-proxy",
+            "installed": installed,
+            "active": active,
+            "path": str(service_file) if installed else None,
+            "template": unit_template,
+        }, indent=2, sort_keys=True))
+        return 0
+
+    print("=== AGY Server Service ===")
+    print(f"Service Name:  agy-proxy")
+    print(f"Installed:     {'Yes' if installed else 'No'}")
+    print(f"Active:        {'Yes' if active else 'No'}")
+    if not installed:
+        print("\nTo install systemd service on Linux, save the following to /etc/systemd/system/agy-proxy.service:")
+        print(unit_template)
+    return 0
+
+
+def handle_client_connect(paths, url: str, as_json: bool = False) -> int:
+    try:
+        cfg = connect_gateway(url, paths)
+    except Exception as e:
+        if as_json:
+            print(json.dumps({"success": False, "error": str(e)}, indent=2))
+        else:
+            print(f"error: {e}")
+        return 1
+
+    if as_json:
+        print(json.dumps({"success": True, "config": cfg}, indent=2, sort_keys=True))
+        return 0
+
+    print(f"[OK] Connected to AGY Gateway: {cfg['gateway_url']}")
+    print(f"  Proxy endpoint:    http://{cfg['proxy_host']}:{cfg['proxy_port']}")
+    print(f"  Active accounts:   {cfg.get('available_accounts', 0)} / {cfg.get('pool_size', 0)}")
+    print(f"  Root CA trust:     {'Installed' if cfg.get('ca_installed') else 'Skipped/Unavailable'}")
+    print(f"\nRun 'agy-run' to send CLI requests through this gateway.")
+    return 0
+
+
+def handle_client_status(paths, as_json: bool = False) -> int:
+    status = get_client_status(paths)
+    if as_json:
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return 0
+
+    print("=== AGY Client Status ===")
+    if not status["configured"]:
+        print("Status:           Standalone / Local (no gateway configured)")
+        print(f"Proxy Endpoint:   http://{status['proxy_host']}:{status['proxy_port']}")
+        print(f"Proxy Available:  {'ONLINE' if status['proxy_online'] else 'OFFLINE'}")
+        print("Note: Run 'agy-client connect <gateway-url>' to link with a remote server.")
+        return 0
+
+    print(f"Gateway URL:      {status['gateway_url']}")
+    print(f"Proxy Endpoint:   http://{status['proxy_host']}:{status['proxy_port']}")
+    print(f"Proxy Status:     {'ONLINE' if status['proxy_online'] else 'OFFLINE'}")
+    print(f"Accounts Pool:    {status.get('available_accounts', '-')}/{status.get('pool_size', '-')}")
+    print(f"Connected At:     {status.get('connected_at') or '-'}")
+    print(f"CA Certificate:   {'Trusted' if status['ca_installed'] else 'Not found'}")
+    return 0
+
+
+def handle_client_disconnect(paths, as_json: bool = False) -> int:
+    disconnect_gateway(paths)
+    if as_json:
+        print(json.dumps({"success": True, "disconnected": True}, indent=2))
+        return 0
+    print("[OK] Disconnected from gateway. agy-run will use local proxy or native agy.")
+    return 0
+
+
+def handle_client_dashboard(paths) -> int:
+    import webbrowser
+    status = get_client_status(paths)
+    url = status.get("gateway_url") or f"http://{status['proxy_host']}:8800"
+    print(f"Opening dashboard: {url}")
+    webbrowser.open(url)
+    return 0
+
+
+def handle_client_test(paths, as_json: bool = False) -> int:
+    status = get_client_status(paths)
+    host = status["proxy_host"]
+    port = status["proxy_port"]
+    start_t = time.time()
+    online = is_proxy_available(host, port, timeout=2.0)
+    latency_ms = round((time.time() - start_t) * 1000, 2)
+    payload = {
+        "proxy_host": host,
+        "proxy_port": port,
+        "online": online,
+        "latency_ms": latency_ms if online else None,
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if online else 1
+
+    print(f"Testing proxy connection to http://{host}:{port}...")
+    if online:
+        print(f"[OK] Proxy is reachable ({latency_ms}ms response time)")
+        return 0
+    print(f"[FAIL] Proxy is unreachable at {host}:{port}")
+    return 1
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -2272,6 +2441,40 @@ def main() -> int:
                 open_browser=not args.no_browser,
             )
             return 0
+        if args.command == "server":
+            action = getattr(args, "server_action", None) or "start"
+            if action == "start":
+                from agy_cli_manager.proxy.launcher import run_proxy_service
+                run_proxy_service(
+                    proxy_host=getattr(args, "proxy_host", "0.0.0.0"),
+                    proxy_port=getattr(args, "proxy_port", 8899),
+                    dashboard_host=getattr(args, "dashboard_host", "0.0.0.0"),
+                    dashboard_port=getattr(args, "dashboard_port", 8800),
+                    open_browser=not getattr(args, "no_browser", False),
+                )
+                return 0
+            if action == "status":
+                if getattr(args, "json", False):
+                    print(json.dumps(get_status_snapshot(paths), indent=2, sort_keys=True))
+                else:
+                    print(format_status(paths))
+                return 0
+            if action == "service":
+                return handle_server_service(paths, getattr(args, "json", False))
+            return 0
+        if args.command == "client":
+            action = getattr(args, "client_action", None) or "status"
+            if action == "connect":
+                return handle_client_connect(paths, args.url, getattr(args, "json", False))
+            if action == "status":
+                return handle_client_status(paths, getattr(args, "json", False))
+            if action == "disconnect":
+                return handle_client_disconnect(paths, getattr(args, "json", False))
+            if action == "dashboard":
+                return handle_client_dashboard(paths)
+            if action == "test":
+                return handle_client_test(paths, getattr(args, "json", False))
+            return 0
         if args.command == "run":
             extra = list(args.extra_args or [])
             if extra and extra[0] == "--":
@@ -2297,6 +2500,98 @@ def run_entrypoint() -> int:
     paths = build_paths(default_root())
     raw_args = sys.argv[1:]
     return run_agy_wrapper(paths, extra_args=raw_args)
+
+
+def server_entrypoint() -> int:
+    """Shortcut entrypoint for standalone 'agy-server' command."""
+    parser = argparse.ArgumentParser(prog="agy-server", description="AGY Proxy Gateway Server")
+    parser.add_argument("--root", type=Path, default=default_root(), help="Manager root directory")
+    sub = parser.add_subparsers(dest="action")
+
+    start_p = sub.add_parser("start", help="Start the proxy gateway & telemetry dashboard")
+    start_p.add_argument("--proxy-host", default="0.0.0.0", help="Proxy listen host (default: 0.0.0.0)")
+    start_p.add_argument("--proxy-port", type=int, default=8899, help="Proxy listen port (default: 8899)")
+    start_p.add_argument("--dashboard-host", default="0.0.0.0", help="Dashboard listen host (default: 0.0.0.0)")
+    start_p.add_argument("--dashboard-port", type=int, default=8800, help="Dashboard listen port (default: 8800)")
+    start_p.add_argument("--no-browser", action="store_true", help="Do not open dashboard in web browser")
+
+    status_p = sub.add_parser("status", help="Show server accounts and proxy status")
+    status_p.add_argument("--json", action="store_true")
+
+    service_p = sub.add_parser("service", help="Show systemd / background service status or template")
+    service_p.add_argument("--json", action="store_true")
+
+    raw_args = sys.argv[1:]
+    if not raw_args or (raw_args[0].startswith("-") and raw_args[0] not in ("-h", "--help")):
+        raw_args = ["start"] + raw_args
+
+    args = parser.parse_args(raw_args)
+    paths = build_paths(args.root)
+
+    if args.action == "start":
+        from agy_cli_manager.proxy.launcher import run_proxy_service
+        run_proxy_service(
+            proxy_host=args.proxy_host,
+            proxy_port=args.proxy_port,
+            dashboard_host=args.dashboard_host,
+            dashboard_port=args.dashboard_port,
+            open_browser=not args.no_browser,
+        )
+        return 0
+    if args.action == "status":
+        if args.json:
+            print(json.dumps(get_status_snapshot(paths), indent=2, sort_keys=True))
+        else:
+            print(format_status(paths))
+        return 0
+    if args.action == "service":
+        return handle_server_service(paths, args.json)
+
+    parser.print_help()
+    return 0
+
+
+def client_entrypoint() -> int:
+    """Shortcut entrypoint for standalone 'agy-client' command."""
+    parser = argparse.ArgumentParser(prog="agy-client", description="AGY Gateway Client Manager")
+    parser.add_argument("--root", type=Path, default=default_root(), help="Manager root directory")
+    sub = parser.add_subparsers(dest="action")
+
+    conn_p = sub.add_parser("connect", help="Connect to an AGY Gateway")
+    conn_p.add_argument("url", help="Gateway URL, e.g. http://<server-ip>:8800")
+    conn_p.add_argument("--json", action="store_true")
+
+    stat_p = sub.add_parser("status", help="Show connection and proxy status")
+    stat_p.add_argument("--json", action="store_true")
+
+    disc_p = sub.add_parser("disconnect", help="Disconnect from gateway")
+    disc_p.add_argument("--json", action="store_true")
+
+    sub.add_parser("dashboard", help="Open connected gateway dashboard in browser")
+
+    test_p = sub.add_parser("test", help="Test connectivity to gateway")
+    test_p.add_argument("--json", action="store_true")
+
+    raw_args = sys.argv[1:]
+    if not raw_args:
+        raw_args = ["status"]
+
+    args = parser.parse_args(raw_args)
+    paths = build_paths(args.root)
+
+    if args.action == "connect":
+        return handle_client_connect(paths, args.url, args.json)
+    if args.action == "status":
+        return handle_client_status(paths, args.json)
+    if args.action == "disconnect":
+        return handle_client_disconnect(paths, args.json)
+    if args.action == "dashboard":
+        return handle_client_dashboard(paths)
+    if args.action == "test":
+        return handle_client_test(paths, args.json)
+
+    parser.print_help()
+    return 0
 
 
 if __name__ == "__main__":

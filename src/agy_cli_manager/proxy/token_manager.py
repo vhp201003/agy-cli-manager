@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.request
 
 import base64
+import threading
 
 from agy_cli_manager.proxy.credential_provider import get_credential_provider, CredentialProvider
 
@@ -17,20 +18,13 @@ logger = logging.getLogger("AgyProxy.TokenManager")
 
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-# Public Antigravity OAuth client credentials (XOR masked to avoid static scanner false-positives)
-_XOR_KEY = 0x5A
-_CID_ENC = bytes([107, 106, 109, 107, 106, 106, 108, 106, 108, 106, 111, 99, 107, 119, 46, 55, 50, 41, 41, 51, 52, 104, 50, 104, 107, 54, 57, 40, 63, 104, 105, 111, 44, 46, 53, 54, 53, 48, 50, 110, 61, 110, 106, 105, 63, 42, 116, 59, 42, 42, 41, 116, 61, 53, 53, 61, 54, 63, 47, 41, 63, 40, 57, 53, 52, 46, 63, 52, 46, 116, 57, 53, 55])
-_SEC_ENC = bytes([29, 21, 25, 9, 10, 2, 119, 17, 111, 98, 28, 13, 8, 110, 98, 108, 22, 62, 22, 16, 107, 55, 22, 24, 98, 41, 2, 25, 110, 32, 108, 43, 30, 27, 60])
-
-_DEFAULT_CLIENT_ID = bytes([b ^ _XOR_KEY for b in _CID_ENC]).decode("utf-8")
-_DEFAULT_CLIENT_SECRET = bytes([b ^ _XOR_KEY for b in _SEC_ENC]).decode("utf-8")
-
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", _DEFAULT_CLIENT_ID)
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", _DEFAULT_CLIENT_SECRET)
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
 
 class TokenManager:
     def __init__(self, manager_root: Path | None = None) -> None:
+        self._lock = threading.RLock()
         self.manager_root = (
             manager_root or Path.home() / ".agy-cli-manager"
         )
@@ -42,21 +36,19 @@ class TokenManager:
         self.reload_accounts()
 
     def reload_accounts(self) -> None:
-        account_names: list[str] = []
-        active = None
-        if self.state_file.is_file():
-            try:
-                state = json.loads(self.state_file.read_text(encoding="utf-8"))
-                account_names = list(state.get("accounts", {}).keys())
-                active = state.get("active")
-                if active and active in account_names:
-                    account_names.remove(active)
-                    account_names.insert(0, active)
-            except Exception:
-                pass
-
-        if not account_names:
-            account_names = ["acc3", "acc1", "acc2"]
+        with self._lock:
+            account_names: list[str] = []
+            active = None
+            if self.state_file.is_file():
+                try:
+                    state = json.loads(self.state_file.read_text(encoding="utf-8"))
+                    account_names = list(state.get("accounts", {}).keys())
+                    active = state.get("active")
+                    if active and active in account_names:
+                        account_names.remove(active)
+                        account_names.insert(0, active)
+                except Exception:
+                    pass
 
         for name in account_names:
             data = self.provider.read_account(name)
@@ -127,20 +119,26 @@ class TokenManager:
             self._current_active_account = next(iter(self._accounts))
 
     def refresh_account_token(self, account_name: str) -> tuple[bool, str]:
-        acc = self._accounts.get(account_name)
-        if not acc:
-            return False, f"Account '{account_name}' not found in pool"
+        with self._lock:
+            acc = self._accounts.get(account_name)
+            if not acc:
+                return False, f"Account '{account_name}' not found in pool"
 
-        refresh_token = acc.get("refresh_token")
-        if not refresh_token:
-            return False, f"No refresh_token for account '{account_name}'"
+            client_id = GOOGLE_CLIENT_ID or acc.get("client_id")
+            client_secret = GOOGLE_CLIENT_SECRET or acc.get("client_secret")
+            if not client_id or not client_secret:
+                return False, "OAuth client credentials not configured (set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)"
 
-        payload = urllib.parse.urlencode({
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }).encode("utf-8")
+            refresh_token = acc.get("refresh_token")
+            if not refresh_token:
+                return False, f"No refresh_token for account '{account_name}'"
+
+            payload = urllib.parse.urlencode({
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }).encode("utf-8")
 
         req = urllib.request.Request(
             GOOGLE_OAUTH_TOKEN_URL,
@@ -206,73 +204,74 @@ class TokenManager:
         return results
 
     def get_token_by_session(self, session_key: str | None = None, model_name: str | None = None) -> tuple[str, str]:
-        if not self._accounts:
-            self.reload_accounts()
+        with self._lock:
+            if not self._accounts:
+                self.reload_accounts()
 
-        if not self._accounts:
-            data = self.provider.read_account("acc1")
-            if data and "token" in data and "access_token" in data["token"]:
-                return "default", data["token"]["access_token"]
-            raise RuntimeError("No accounts available in pool.")
+            if not self._accounts:
+                data = self.provider.read_account("acc1")
+                if data and "token" in data and "access_token" in data["token"]:
+                    return "default", data["token"]["access_token"]
+                raise RuntimeError("No accounts available in pool.")
 
-        now = time.time()
-        cooldown_ok = [
-            name
-            for name in self._accounts
-            if self._cooldowns.get(name, 0) <= now
-        ]
-        if not cooldown_ok:
-            oldest = min(self._cooldowns.items(), key=lambda x: x[1])[0]
-            cooldown_ok = [oldest]
+            now = time.time()
+            cooldown_ok = [
+                name
+                for name in self._accounts
+                if self._cooldowns.get(name, 0) <= now
+            ]
+            if not cooldown_ok:
+                oldest = min(self._cooldowns.items(), key=lambda x: x[1])[0]
+                cooldown_ok = [oldest]
 
-        # Determine target quota family: "gemini" vs "third_party"
-        model_str = (model_name or "").lower()
-        is_claude_or_gpt = any(k in model_str for k in ("claude", "sonnet", "opus", "gpt", "o1", "o3"))
-        target_family = "third_party" if is_claude_or_gpt else "gemini"
+            model_str = (model_name or "").lower()
+            is_claude_or_gpt = any(k in model_str for k in ("claude", "sonnet", "opus", "gpt", "o1", "o3"))
+            target_family = "third_party" if is_claude_or_gpt else "gemini"
 
-        # Quota threshold filter for the specific model family (treat <= 5.0% as exhausted)
-        alive_pool = []
-        for name in cooldown_ok:
-            acc = self._accounts[name]
-            quota = acc.get("quota")
-            if not quota:
+            alive_pool = []
+            for name in cooldown_ok:
+                acc = self._accounts[name]
+                quota = acc.get("quota")
+                if not quota:
+                    alive_pool.append(name)
+                    continue
+                family_quota = quota.get(target_family, {})
+                weekly = family_quota.get("weekly", {})
+                five_h = family_quota.get("5h", {})
+                weekly_pct = weekly.get("percent", 100.0)
+                five_h_pct = five_h.get("percent", 100.0)
+                if weekly.get("disabled") or (weekly_pct <= 5.0 and weekly.get("reset_time")):
+                    continue
+                if five_h.get("disabled") or (five_h_pct <= 5.0 and five_h.get("reset_time")):
+                    continue
                 alive_pool.append(name)
-                continue
-            family_quota = quota.get(target_family, {})
-            weekly = family_quota.get("weekly", {})
-            five_h = family_quota.get("5h", {})
-            weekly_pct = weekly.get("percent", 100.0)
-            five_h_pct = five_h.get("percent", 100.0)
-            if weekly.get("disabled") or (weekly_pct <= 5.0 and weekly.get("reset_time")):
-                continue
-            if five_h.get("disabled") or (five_h_pct <= 5.0 and five_h.get("reset_time")):
-                continue
-            alive_pool.append(name)
 
-        if not alive_pool:
-            alive_pool = cooldown_ok
+            if not alive_pool:
+                alive_pool = cooldown_ok
 
-        if not session_key:
-            if self._current_active_account in alive_pool:
-                chosen_name = self._current_active_account
-            else:
-                chosen_name = alive_pool[0]
-                self._current_active_account = chosen_name
+            if not session_key:
+                if self._current_active_account in alive_pool:
+                    chosen_name = self._current_active_account
+                else:
+                    chosen_name = alive_pool[0]
+                    self._current_active_account = chosen_name
+                return chosen_name, self._accounts[chosen_name]["access_token"]
+
+            import hashlib
+            h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest(), 16)
+            chosen_name = alive_pool[h % len(alive_pool)]
             return chosen_name, self._accounts[chosen_name]["access_token"]
-
-        import hashlib
-        h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest(), 16)
-        chosen_name = alive_pool[h % len(alive_pool)]
-        return chosen_name, self._accounts[chosen_name]["access_token"]
 
     def get_token_for_request(self) -> tuple[str, str]:
         return self.get_token_by_session(None)
 
     def mark_429(self, account_name: str, cooldown_seconds: int = 600) -> None:
-        self._cooldowns[account_name] = time.time() + cooldown_seconds
+        with self._lock:
+            self._cooldowns[account_name] = time.time() + cooldown_seconds
 
     def clear_cooldown(self, account_name: str) -> None:
-        self._cooldowns.pop(account_name, None)
+        with self._lock:
+            self._cooldowns.pop(account_name, None)
 
     def fetch_account_quota(self, account_name: str) -> dict | None:
         acc = self._accounts.get(account_name)
@@ -466,34 +465,35 @@ class TokenManager:
         return res
 
     def get_status(self) -> dict:
-        now = time.time()
-        res = {}
-        for name, acc in self._accounts.items():
-            cd = self._cooldowns.get(name, 0)
-            expires_at = acc.get("expires_at", 0)
-            res[name] = {
-                "name": name,
-                "email": acc.get("email", name),
-                "display_name": acc.get("display_name", name),
-                "is_active": cd <= now,
-                "is_current_runner": (name == self._current_active_account),
-                "in_cooldown": cd > now,
-                "cooldown_remaining_sec": max(0, int(cd - now)),
-                "token_expires_in_sec": max(0, int(expires_at - now)),
-                "token_expires_in_min": round(max(0, expires_at - now) / 60, 1),
-                "token_preview": acc["access_token"][:12] + "..." + acc["access_token"][-6:],
-                "has_refresh_token": bool(acc.get("refresh_token")),
-                "last_refreshed": acc.get("last_refreshed", 0),
-                "quota": acc.get("quota") or {
-                    "gemini": {
-                        "5h": {"percent": 100.0, "fraction": 1.0, "reset_time": None, "desc": ""},
-                        "weekly": {"percent": 100.0, "fraction": 1.0, "reset_time": None, "desc": ""},
+        with self._lock:
+            now = time.time()
+            res = {}
+            for name, acc in list(self._accounts.items()):
+                cd = self._cooldowns.get(name, 0)
+                expires_at = acc.get("expires_at", 0)
+                res[name] = {
+                    "name": name,
+                    "email": acc.get("email", name),
+                    "display_name": acc.get("display_name", name),
+                    "is_active": cd <= now,
+                    "is_current_runner": (name == self._current_active_account),
+                    "in_cooldown": cd > now,
+                    "cooldown_remaining_sec": max(0, int(cd - now)),
+                    "token_expires_in_sec": max(0, int(expires_at - now)),
+                    "token_expires_in_min": round(max(0, expires_at - now) / 60, 1),
+                    "token_preview": acc["access_token"][:12] + "..." + acc["access_token"][-6:],
+                    "has_refresh_token": bool(acc.get("refresh_token")),
+                    "last_refreshed": acc.get("last_refreshed", 0),
+                    "quota": acc.get("quota") or {
+                        "gemini": {
+                            "5h": {"percent": 100.0, "fraction": 1.0, "reset_time": None, "desc": ""},
+                            "weekly": {"percent": 100.0, "fraction": 1.0, "reset_time": None, "desc": ""},
+                        },
+                        "third_party": {
+                            "5h": {"percent": 100.0, "fraction": 1.0, "reset_time": None, "desc": ""},
+                            "weekly": {"percent": 100.0, "fraction": 1.0, "reset_time": None, "desc": ""},
+                        },
+                        "last_synced": 0,
                     },
-                    "third_party": {
-                        "5h": {"percent": 100.0, "fraction": 1.0, "reset_time": None, "desc": ""},
-                        "weekly": {"percent": 100.0, "fraction": 1.0, "reset_time": None, "desc": ""},
-                    },
-                    "last_synced": 0,
-                },
-            }
-        return res
+                }
+            return res

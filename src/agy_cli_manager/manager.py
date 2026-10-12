@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -643,33 +644,197 @@ def resolve_ca_bundle_path(paths: ManagerPaths | None = None) -> Path | None:
     return None
 
 
+def client_config_path(root: Path | None = None) -> Path:
+    return (root or default_root()) / "config.json"
+
+
+def load_client_config(root: Path | None = None) -> dict:
+    path = client_config_path(root)
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_client_config(data: dict, root: Path | None = None) -> None:
+    path = client_config_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def reset_client_config(root: Path | None = None) -> None:
+    path = client_config_path(root)
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def install_client_ca(paths: ManagerPaths | None, ca_pem: bytes) -> tuple[Path, bool]:
+    certs_dir = (paths.root if paths else Path.home() / ".agy-cli-manager") / "certs"
+    certs_dir.mkdir(parents=True, exist_ok=True)
+    ca_file = certs_dir / "ca.crt"
+    ca_file.write_bytes(ca_pem)
+
+    bundle_path = certs_dir / "bundle.crt"
+    base_cacert = b""
+    try:
+        import certifi
+        base_cacert = Path(certifi.where()).read_bytes()
+    except Exception:
+        try:
+            import ssl
+            vpaths = ssl.get_default_verify_paths()
+            if vpaths.cafile and Path(vpaths.cafile).is_file():
+                base_cacert = Path(vpaths.cafile).read_bytes()
+        except Exception:
+            pass
+    bundle_path.write_bytes(base_cacert + b"\n" + ca_pem)
+    return bundle_path, True
+
+
+def connect_gateway(
+    gateway_url: str,
+    paths: ManagerPaths | None = None,
+    timeout_seconds: float = 5.0,
+) -> dict:
+    raw = gateway_url.strip().rstrip("/")
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urllib.parse.urlparse(raw)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 8800
+    scheme = parsed.scheme or "http"
+    base_url = f"{scheme}://{host}:{port}"
+
+    req = urllib.request.Request(f"{base_url}/api/status", headers={"User-Agent": "agy-client"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            status_data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Could not connect to AGY Gateway at {base_url}: {e}")
+
+    proxy_port = int(status_data.get("proxy_port", 8899))
+    ca_installed = False
+    ca_path = None
+    try:
+        ca_req = urllib.request.Request(f"{base_url}/ca.crt", headers={"User-Agent": "agy-client"})
+        with urllib.request.urlopen(ca_req, timeout=timeout_seconds) as resp:
+            ca_pem = resp.read()
+            if ca_pem and b"BEGIN CERTIFICATE" in ca_pem:
+                bundle_path, _ = install_client_ca(paths, ca_pem)
+                ca_installed = True
+                ca_path = str(bundle_path)
+    except Exception:
+        pass
+
+    config = {
+        "gateway_url": base_url,
+        "proxy_host": host,
+        "proxy_port": proxy_port,
+        "connected_at": datetime.now(timezone.utc).isoformat(),
+        "pool_size": status_data.get("pool_size", 0),
+        "available_accounts": status_data.get("available_accounts", 0),
+        "ca_installed": ca_installed,
+    }
+    if ca_path:
+        config["ca_bundle"] = ca_path
+
+    root = paths.root if paths else None
+    save_client_config(config, root)
+    return config
+
+
+def disconnect_gateway(paths: ManagerPaths | None = None) -> bool:
+    root = paths.root if paths else None
+    reset_client_config(root)
+    return True
+
+
+def get_client_status(paths: ManagerPaths | None = None) -> dict:
+    root = paths.root if paths else None
+    cfg = load_client_config(root)
+    target_host, target_port = resolve_proxy_endpoint(paths)
+    probe_timeout = 0.5 if target_host in ("127.0.0.1", "localhost") else 2.5
+    is_online = is_proxy_available(target_host, target_port, timeout=probe_timeout)
+    bundle_path = resolve_ca_bundle_path(paths)
+    return {
+        "configured": bool(cfg.get("gateway_url") or cfg.get("proxy_host")),
+        "gateway_url": cfg.get("gateway_url"),
+        "proxy_host": target_host,
+        "proxy_port": target_port,
+        "proxy_online": is_online,
+        "connected_at": cfg.get("connected_at"),
+        "ca_bundle": str(bundle_path) if bundle_path else None,
+        "ca_installed": bool(cfg.get("ca_installed", False) or bundle_path),
+        "pool_size": cfg.get("pool_size"),
+        "available_accounts": cfg.get("available_accounts"),
+    }
+
+
+def resolve_proxy_endpoint(
+    paths: ManagerPaths | None = None,
+    proxy_host: str | None = None,
+    proxy_port: int | None = None,
+) -> tuple[str, int]:
+    env_url = os.environ.get("AGY_PROXY_URL", "").strip()
+    if env_url:
+        parsed = urllib.parse.urlparse(env_url if "://" in env_url else f"http://{env_url}")
+        return parsed.hostname or "127.0.0.1", parsed.port or 8899
+
+    env_host = os.environ.get("AGY_PROXY_HOST", "").strip()
+    env_port = os.environ.get("AGY_PROXY_PORT", "").strip()
+    if env_host:
+        return env_host, int(env_port) if env_port.isdigit() else 8899
+
+    if proxy_host is not None:
+        return proxy_host, proxy_port or 8899
+
+    root = paths.root if paths else None
+    cfg = load_client_config(root)
+    if cfg.get("proxy_host"):
+        return str(cfg["proxy_host"]), int(cfg.get("proxy_port", 8899))
+
+    return "127.0.0.1", 8899
+
+
 def run_agy_wrapper(
     paths: ManagerPaths,
     extra_args: list[str] | None = None,
     agy_binary: str | None = None,
-    proxy_host: str = "127.0.0.1",
-    proxy_port: int = 8899,
+    proxy_host: str | None = None,
+    proxy_port: int | None = None,
 ) -> int:
     resolved_bin = resolve_agy_binary(agy_binary)
-    proxy_online = is_proxy_available(proxy_host, proxy_port)
+    target_host, target_port = resolve_proxy_endpoint(paths, proxy_host, proxy_port)
+    probe_timeout = 0.5 if target_host in ("127.0.0.1", "localhost") else 2.5
+    proxy_online = is_proxy_available(target_host, target_port, timeout=probe_timeout)
     env = os.environ.copy()
 
     if proxy_online:
-        proxy_url = f"http://{proxy_host}:{proxy_port}"
+        proxy_url = f"http://{target_host}:{target_port}"
         env["HTTP_PROXY"] = proxy_url
         env["HTTPS_PROXY"] = proxy_url
         bundle_path = resolve_ca_bundle_path(paths)
         if bundle_path:
             env["SSL_CERT_FILE"] = str(bundle_path)
+            env["REQUESTS_CA_BUNDLE"] = str(bundle_path)
+            env["NODE_EXTRA_CA_CERTS"] = str(bundle_path)
             print(f"[AGY-RUN] Proxy online -> {proxy_url} (SSL cert: {bundle_path.name})")
         else:
             print(f"[AGY-RUN] Proxy online -> {proxy_url} (No custom CA bundle detected)")
     else:
-        # Ensure proxy environment variables don't bleed through
         env.pop("HTTP_PROXY", None)
         env.pop("HTTPS_PROXY", None)
         env.pop("SSL_CERT_FILE", None)
-        print("[AGY-RUN] Proxy is offline/unreachable. Running native agy directly.")
+        env.pop("REQUESTS_CA_BUNDLE", None)
+        env.pop("NODE_EXTRA_CA_CERTS", None)
+        print(f"[AGY-RUN] Proxy is offline/unreachable at http://{target_host}:{target_port}. Running native agy directly.")
 
     cmd = [resolved_bin] + (extra_args or [])
     try:

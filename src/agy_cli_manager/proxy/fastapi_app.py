@@ -10,7 +10,7 @@ import time
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
@@ -143,10 +143,23 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/ca.crt")
+async def get_ca_certificate():
+    from agy_cli_manager.proxy.cert_manager import CertManager
+    cm = CertManager()
+    if cm.ca_crt_path.is_file():
+        return Response(
+            content=cm.ca_crt_path.read_text(encoding="utf-8"),
+            media_type="application/x-x509-ca-cert",
+            headers={"Content-Disposition": 'attachment; filename="ca.crt"'},
+        )
+    return JSONResponse(status_code=404, content={"error": "CA certificate not found"})
 
 
 @app.get("/api/status")
@@ -876,6 +889,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="subtitle">Proxy Port: 8899 | Real-Time Telemetry & Quota Inspector</div>
     </div>
     <div class="actions">
+      <!-- Connect Client Button -->
+      <button onclick="openConnectModal()" class="primary" id="btnConnect" title="Connect Developer Client to this Gateway">
+        <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        <span>Connect Client</span>
+      </button>
+
       <!-- Trigger 5H Quota Button -->
       <button onclick="warmupAllAccounts(this)" id="btnWarmup" title="Activate 5H window on all accounts">
         <svg class="btn-svg" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
@@ -1885,7 +1904,53 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     setInterval(pollLogs, 1500);
     setInterval(fetchStatus, 8000);
+
+    function openConnectModal() {
+      const origin = window.location.origin;
+      const cmd = `agy-client connect ${origin}`;
+      const elem = document.getElementById('connectCmdText');
+      if (elem) elem.innerText = cmd;
+      const modal = document.getElementById('connectModal');
+      if (modal) modal.style.display = 'flex';
+    }
+
+    function closeConnectModal() {
+      const modal = document.getElementById('connectModal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    function copyConnectCmd(btn) {
+      const text = document.getElementById('connectCmdText').innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        const orig = btn.innerText;
+        btn.innerText = 'Copied!';
+        setTimeout(() => btn.innerText = orig, 1800);
+      });
+    }
   </script>
+
+  <!-- Connect Client Modal -->
+  <div id="connectModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:9999; align-items:center; justify-content:center; backdrop-filter:blur(4px);" onclick="if(event.target===this)closeConnectModal()">
+    <div style="background:#1e222b; border:1px solid #2d3342; border-radius:12px; width:90%; max-width:540px; padding:24px; box-shadow:0 20px 40px rgba(0,0,0,0.6); font-family:inherit; color:#fff;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+        <h3 style="margin:0; font-size:1.15rem; font-weight:600; display:flex; align-items:center; gap:8px;">
+          <span>🔗</span> Connect Developer Client
+        </h3>
+        <button onclick="closeConnectModal()" style="background:none; border:none; color:#888; font-size:1.4rem; cursor:pointer; line-height:1;">&times;</button>
+      </div>
+      <p style="color:#aaa; font-size:0.9rem; margin-top:0; margin-bottom:16px; line-height:1.5;">
+        Run this 1-liner in your terminal to connect <code>agy-run</code> directly to this gateway:
+      </p>
+      <div style="background:#11141a; border:1px solid #333a4d; border-radius:8px; padding:12px 14px; display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; font-family:monospace; font-size:0.9rem;">
+        <span id="connectCmdText" style="color:#4ade80; overflow-x:auto; white-space:nowrap; margin-right:8px;">agy-client connect http://...</span>
+        <button onclick="copyConnectCmd(this)" style="background:#2563eb; color:#fff; border:none; padding:6px 12px; border-radius:6px; cursor:pointer; font-size:0.8rem; font-weight:600; flex-shrink:0;">Copy</button>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid #2d3342; padding-top:14px; font-size:0.85rem; color:#888;">
+        <span>Manual Root CA Certificate:</span>
+        <a href="/ca.crt" download="ca.crt" style="color:#38bdf8; text-decoration:none; font-weight:500;">⬇️ Download ca.crt</a>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
 """
