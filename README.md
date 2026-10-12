@@ -132,29 +132,50 @@ agy-cli-manager list
 agy-cli-manager
 ```
 
-### 5. Multi-Account Proxy & OpenAI API Gateway
+### 5. Client-Server Architecture & Multi-Account Proxy
 
-Run the built-in dual-surface gateway with token pooling, automatic 429/403 failover, live web telemetry, and standard OpenAI `/v1/chat/completions` API:
+`agy-cli-manager` supports a decoupled **Client-Server Architecture**: run the gateway daemon on a remote VPS (or background server) and connect your developer machines with one command.
 
+For full technical specifications, see [docs/architecture.md](docs/architecture.md).
+
+#### Server Daemon (`agy-server`)
+Start the dual-surface gateway daemon:
 ```bash
-# Install proxy dependencies
-pip install ".[proxy]"
-
-# Start proxy gateway (Web Dashboard & API on :8800, forward proxy on :8899)
-agy-cli-manager proxy
+agy-server
+# or: agy-cli-manager proxy --dashboard-host 0.0.0.0 --proxy-host 0.0.0.0
 ```
+- **Port `8899`** (`--proxy-port`): Forward HTTP/HTTPS proxy for Antigravity CLI with SSL interception, round-robin rotation, and automatic rate-limit failovers.
+- **Port `8800`** (`--dashboard-port`): Web Dashboard (styled with the Vercel Geist Design System & Zero-G Prism logo), real-time SSE telemetry, Root CA endpoint (`/ca.crt`), Daily Token Analytics, and OpenAI-compatible API (`/v1/chat/completions`).
 
-The server exposes two distinct ports:
-- **Port `8899`** (`--proxy-port`): Forward HTTP/HTTPS proxy for Antigravity CLI (`agy-run`) with SSL interception.
-- **Port `8800`** (`--dashboard-port`): FastAPI server hosting the Web Dashboard, interactive OpenAPI docs (`/docs`), and OpenAI-compatible API (`/v1/chat/completions`).
+#### Developer Client (`agy-client` & `agy-run`)
+On your developer laptop:
+```bash
+# 1. Connect to gateway (remote VPS or local server)
+agy-client connect http://192.168.40.24:8800
 
-#### Using with Antigravity CLI
-In your working terminal, run:
-```powershell
+# 2. Inspect active gateway status and pool health
+agy-client status
+
+# 3. Launch Antigravity CLI with zero-config proxy injection
 agy-run
-# or: agy-cli-manager run
 ```
-*(Automatically hooks into the proxy at `127.0.0.1:8899` and configures the SSL certificate, or safely falls back to native `agy` if the proxy is offline).*
+`agy-client connect` automatically:
+- Tests connectivity to the gateway.
+- Downloads the Root CA from `<gateway_url>/ca.crt`.
+- Installs the CA certificate cleanly into the Windows Certificate Store (`CurrentUser\Root`).
+- Compiles the unified CA bundle `~/.agy-cli-manager/bundle.crt`.
+- `agy-run` injects `HTTP_PROXY`, `HTTPS_PROXY`, and `SSL_CERT_FILE` dynamically.
+
+To disconnect and restore local defaults:
+```bash
+agy-client disconnect
+```
+
+#### Daily Token Analytics & Consumption Dashboard
+Visit `http://localhost:8800` (or `http://<vps-ip>:8800`):
+- **Daily Stacked Bar Chart:** 7, 14, and 30-day interactive token consumption visualization comparing Prompt vs Completion tokens.
+- **Breakdown Tables:** Detailed token statistics grouped by calendar date, account, and AI model.
+- **Vercel Geist Identity:** Precision-engineered Zero-G Prism logo with 1px hairline optics and scalable Bi-Facet Delta favicon.
 
 #### Using the OpenAI-Compatible API (`/v1/chat/completions`)
 Call the endpoint directly with curl or any HTTP client:
@@ -175,14 +196,6 @@ Or configure any OpenAI SDK, agent, or tool (Cursor, Cline, Aider, OpenCode):
 export OPENAI_BASE_URL="http://127.0.0.1:8800/v1"
 export OPENAI_API_KEY="none"
 ```
-
-Features included:
-- **Automatic Model Translation:** Aliases legacy and standard model names (e.g., `gemini-1.5-pro-latest` mapped to `gemini-2.5-flash`).
-- **Bidirectional Tool Calling:** Full translation between OpenAI `tools`/`tool_calls` and Gemini `functionDeclarations`/`functionResponse`.
-- **Streaming:** Server-Sent Events (`stream: true`) fully compatible with standard OpenAI streaming clients.
-- **Resilient Multi-Account Routing:** Manages account token pools, preserves session stickiness via `x-session-id` (or agent request IDs), auto-refreshes OAuth tokens, and transparently retries on `429`/`403` with cooldown backoff.
-- **Live SSE Telemetry Dashboard:** Web interface at `http://127.0.0.1:8800` with payload inspection and token statistics.
-- **1-Click 5H Window Quota Trigger:** Proactively initializes the 5h quota window across all accounts using minimal token cost (`daily-cloudcode-pa.googleapis.com`).
 
 ### 6. Auto-switch when quota is full
 

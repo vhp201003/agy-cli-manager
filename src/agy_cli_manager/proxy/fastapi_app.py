@@ -162,6 +162,28 @@ async def get_ca_certificate():
     return JSONResponse(status_code=404, content={"error": "CA certificate not found"})
 
 
+FAVICON_SVG = """<svg width="32" height="32" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" shape-rendering="geometricPrecision">
+  <defs>
+    <clipPath id="delta-clip">
+      <polygon points="8,2 8,14 14,14"/>
+    </clipPath>
+  </defs>
+  <polygon points="8,2 2,14 8,14" fill="#EDEDED"/>
+  <polygon points="8,2 8,14 14,14" fill="#171717" stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
+  <rect x="11" y="11" width="3" height="3" fill="#0070F3" clip-path="url(#delta-clip)"/>
+</svg>"""
+
+
+@app.get("/favicon.svg")
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(
+        content=FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+
+
 @app.get("/api/status")
 async def get_status():
     status = tm_instance.get_status()
@@ -542,6 +564,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AGY Multi-Account Router & Quota Telemetry</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -569,6 +592,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     
     /* Top Header */
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 18px; flex-wrap: wrap; gap: 16px; }
+    .brand-wrap { display: flex; align-items: center; gap: 12px; }
+    .header-logo { flex-shrink: 0; }
     .title-group h1 { font-size: 1.25rem; font-weight: 600; color: #fff; display: flex; align-items: center; gap: 10px; letter-spacing: -0.02em; }
     .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2.5s infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(1.1); } }
@@ -931,9 +956,43 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="toastContainer"></div>
   <!-- Header -->
   <div class="header">
-    <div class="title-group">
-      <h1><div class="pulse-dot"></div> AGY Multi-Account Router</h1>
-      <div class="subtitle">Proxy Port: 8899 | Real-Time Telemetry & Quota Inspector</div>
+    <div class="brand-wrap">
+      <svg class="header-logo" width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" shape-rendering="geometricPrecision" title="AGY Zero-G Prism">
+        <defs>
+          <linearGradient id="v-spec" x1="16" y1="5" x2="26" y2="22" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.28"/>
+            <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.04"/>
+          </linearGradient>
+          <linearGradient id="v-flank" x1="6" y1="22" x2="16" y2="22" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.10"/>
+            <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.01"/>
+          </linearGradient>
+          <linearGradient id="v-cyan" x1="21" y1="17.5" x2="31" y2="14.5" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#00DFD8"/>
+            <stop offset="100%" stop-color="#00DFD8" stop-opacity="0"/>
+          </linearGradient>
+          <linearGradient id="v-blue" x1="21" y1="19.5" x2="31" y2="19.5" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#0070F3"/>
+            <stop offset="100%" stop-color="#0070F3" stop-opacity="0"/>
+          </linearGradient>
+          <linearGradient id="v-purp" x1="21" y1="21.5" x2="31" y2="24.5" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#7928CA"/>
+            <stop offset="100%" stop-color="#7928CA" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <line x1="3" y1="6" x2="12" y2="15" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.75" stroke-linecap="round"/>
+        <polygon points="6,22 16,26 26,22 16,21" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+        <polygon points="16,5 6,22 16,21" fill="url(#v-flank)" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>
+        <polygon points="16,5 16,21 26,22" fill="url(#v-spec)" stroke="rgba(255,255,255,0.32)" stroke-width="1"/>
+        <line x1="16" y1="5" x2="16" y2="21" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.6"/>
+        <line x1="21" y1="17.5" x2="31" y2="14.5" stroke="url(#v-cyan)" stroke-width="1" stroke-linecap="round"/>
+        <line x1="21" y1="19.5" x2="31" y2="19.5" stroke="url(#v-blue)" stroke-width="1" stroke-linecap="round"/>
+        <line x1="21" y1="21.5" x2="31" y2="24.5" stroke="url(#v-purp)" stroke-width="1" stroke-linecap="round"/>
+      </svg>
+      <div class="title-group">
+        <h1><div class="pulse-dot"></div> AGY Multi-Account Router</h1>
+        <div class="subtitle">Proxy Port: 8899 | Real-Time Telemetry & Quota Inspector</div>
+      </div>
     </div>
     <div class="actions">
       <!-- Connect Client Button -->

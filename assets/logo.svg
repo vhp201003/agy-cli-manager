@@ -1,0 +1,33 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" shape-rendering="geometricPrecision">
+  <defs>
+    <linearGradient id="v-spec" x1="16" y1="5" x2="26" y2="22" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.04"/>
+    </linearGradient>
+    <linearGradient id="v-flank" x1="6" y1="22" x2="16" y2="22" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.01"/>
+    </linearGradient>
+    <linearGradient id="v-cyan" x1="21" y1="17.5" x2="31" y2="14.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00DFD8"/>
+      <stop offset="100%" stop-color="#00DFD8" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="v-blue" x1="21" y1="19.5" x2="31" y2="19.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0070F3"/>
+      <stop offset="100%" stop-color="#0070F3" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="v-purp" x1="21" y1="21.5" x2="31" y2="24.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7928CA"/>
+      <stop offset="100%" stop-color="#7928CA" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <line x1="3" y1="6" x2="12" y2="15" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.75" stroke-linecap="round"/>
+  <polygon points="6,22 16,26 26,22 16,21" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+  <polygon points="16,5 6,22 16,21" fill="url(#v-flank)" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>
+  <polygon points="16,5 16,21 26,22" fill="url(#v-spec)" stroke="rgba(255,255,255,0.32)" stroke-width="1"/>
+  <line x1="16" y1="5" x2="16" y2="21" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.6"/>
+  <line x1="21" y1="17.5" x2="31" y2="14.5" stroke="url(#v-cyan)" stroke-width="1" stroke-linecap="round"/>
+  <line x1="21" y1="19.5" x2="31" y2="19.5" stroke="url(#v-blue)" stroke-width="1" stroke-linecap="round"/>
+  <line x1="21" y1="21.5" x2="31" y2="24.5" stroke="url(#v-purp)" stroke-width="1" stroke-linecap="round"/>
+</svg>
