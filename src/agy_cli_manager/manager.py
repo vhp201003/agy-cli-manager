@@ -825,6 +825,9 @@ def run_agy_wrapper(
             env["SSL_CERT_FILE"] = str(bundle_path)
             env["REQUESTS_CA_BUNDLE"] = str(bundle_path)
             env["NODE_EXTRA_CA_CERTS"] = str(bundle_path)
+            existing_godebug = env.get("GODEBUG", "")
+            if "x509usefallbackroots=1" not in existing_godebug:
+                env["GODEBUG"] = f"{existing_godebug},x509usefallbackroots=1".strip(",")
             print(f"[AGY-RUN] Proxy online -> {proxy_url} (SSL cert: {bundle_path.name})")
         else:
             print(f"[AGY-RUN] Proxy online -> {proxy_url} (No custom CA bundle detected)")
