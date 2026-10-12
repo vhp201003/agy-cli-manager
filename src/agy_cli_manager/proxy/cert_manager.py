@@ -175,7 +175,14 @@ class CertManager:
             "powershell",
             "-NoProfile",
             "-Command",
-            f"Import-Certificate -FilePath '{self.ca_crt_path}' -CertStoreLocation Cert:\\CurrentUser\\Root | Out-Null; $?",
+            (
+                "$path = $args[0]; "
+                "$currentCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($path); "
+                "Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -like '*AGY Local Proxy CA*' -and $_.Thumbprint -ne $currentCert.Thumbprint } | "
+                "ForEach-Object { Remove-Item -Path \"HKCU:\\Software\\Microsoft\\SystemCertificates\\Root\\Certificates\\$($_.Thumbprint)\" -Recurse -Force -ErrorAction SilentlyContinue }; "
+                "Import-Certificate -FilePath $path -CertStoreLocation Cert:\\CurrentUser\\Root | Out-Null; $?"
+            ),
+            str(self.ca_crt_path),
         ]
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)

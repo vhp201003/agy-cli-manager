@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.request
 
 import base64
+from datetime import datetime, timezone
 import threading
 
 from agy_cli_manager.proxy.credential_provider import get_credential_provider, CredentialProvider
@@ -18,8 +19,40 @@ logger = logging.getLogger("AgyProxy.TokenManager")
 
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+
+def _resolve_oauth_credentials(manager_root: Path) -> tuple[str | None, str | None]:
+    cid = os.environ.get("GOOGLE_CLIENT_ID")
+    csec = os.environ.get("GOOGLE_CLIENT_SECRET")
+    if cid and csec:
+        return cid, csec
+
+    for env_path in (manager_root / ".env", Path.cwd() / ".env"):
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip("'\"")
+                    if k == "GOOGLE_CLIENT_ID" and not cid:
+                        cid = v
+                    elif k == "GOOGLE_CLIENT_SECRET" and not csec:
+                        csec = v
+            except Exception:
+                pass
+
+    if not cid or not csec:
+        cfg_file = manager_root / "config.json"
+        if cfg_file.is_file():
+            try:
+                cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+                cid = cid or cfg.get("google_client_id")
+                csec = csec or cfg.get("google_client_secret")
+            except Exception:
+                pass
+
+    return cid, csec
 
 
 class TokenManager:
@@ -124,8 +157,9 @@ class TokenManager:
             if not acc:
                 return False, f"Account '{account_name}' not found in pool"
 
-            client_id = GOOGLE_CLIENT_ID or acc.get("client_id")
-            client_secret = GOOGLE_CLIENT_SECRET or acc.get("client_secret")
+            env_cid, env_csec = _resolve_oauth_credentials(self.manager_root)
+            client_id = acc.get("client_id") or env_cid
+            client_secret = acc.get("client_secret") or env_csec
             if not client_id or not client_secret:
                 return False, "OAuth client credentials not configured (set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)"
 
@@ -157,17 +191,16 @@ class TokenManager:
             if not new_access_token:
                 return False, "Google response missing access_token"
 
-            # Update in-memory
             acc["access_token"] = new_access_token
             acc["expires_at"] = time.time() + expires_in
             acc["last_refreshed"] = time.time()
             self.clear_cooldown(account_name)
 
-            # Persist via Credential Provider
             blob = self.provider.read_account(account_name) or {}
             tok = blob.setdefault("token", {})
             tok["access_token"] = new_access_token
             tok["expiry_timestamp"] = acc["expires_at"]
+            tok["expiry"] = datetime.fromtimestamp(acc["expires_at"], tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             tok["refresh_token"] = refresh_token
             self.provider.write_account(account_name, blob)
 
@@ -255,11 +288,21 @@ class TokenManager:
                 else:
                     chosen_name = alive_pool[0]
                     self._current_active_account = chosen_name
-                return chosen_name, self._accounts[chosen_name]["access_token"]
+            else:
+                import hashlib
+                h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest(), 16)
+                chosen_name = alive_pool[h % len(alive_pool)]
 
-            import hashlib
-            h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest(), 16)
-            chosen_name = alive_pool[h % len(alive_pool)]
+            acc_data = self._accounts[chosen_name]
+            needs_refresh = (
+                acc_data.get("expires_at", 0) <= time.time() + 60
+                and bool(acc_data.get("refresh_token"))
+            )
+
+        if needs_refresh:
+            self.refresh_account_token(chosen_name)
+
+        with self._lock:
             return chosen_name, self._accounts[chosen_name]["access_token"]
 
     def get_token_for_request(self) -> tuple[str, str]:
@@ -273,12 +316,11 @@ class TokenManager:
         with self._lock:
             self._cooldowns.pop(account_name, None)
 
-    def fetch_account_quota(self, account_name: str) -> dict | None:
+    def fetch_account_quota(self, account_name: str, _retry: bool = True) -> dict | None:
         acc = self._accounts.get(account_name)
         if not acc:
             return None
 
-        # Proactively refresh token if expired or about to expire
         expires_at = acc.get("expires_at", 0)
         if expires_at and time.time() >= expires_at - 180:
             logger.info(f"Token for {account_name} is near expiry; refreshing before quota fetch...")
@@ -320,7 +362,6 @@ class TokenManager:
                 desc_name = (group.get("description") or "").lower()
                 combined_name = f"{disp_name} {desc_name}"
 
-                # Classify family
                 target_key = "gemini" if "gemini" in combined_name else "third_party"
 
                 buckets = group.get("buckets", [])
@@ -340,7 +381,6 @@ class TokenManager:
                     bucket_id = str(b.get("bucketId") or "").lower()
 
                     existing_bucket = parsed_quota[target_key][w]
-                    # Update bucket prioritizing lowest capacity (bottleneck model) or first seen
                     should_update = (
                         existing_bucket["reset_time"] is None
                         or (rem is not None and rem < existing_bucket["fraction"])
@@ -359,12 +399,11 @@ class TokenManager:
             acc["quota"] = parsed_quota
             return parsed_quota
         except urllib.error.HTTPError as e:
-            if e.code == 401:
+            if e.code == 401 and _retry:
                 logger.warning(f"Quota fetch 401 for {account_name}, attempting refresh...")
                 ok, _ = self.refresh_account_token(account_name)
                 if ok:
-                    # Retry once with refreshed token
-                    return self.fetch_account_quota(account_name)
+                    return self.fetch_account_quota(account_name, _retry=False)
             logger.debug(f"Could not fetch quota for {account_name}: {e}")
             return acc.get("quota")
         except Exception as e:

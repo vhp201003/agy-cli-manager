@@ -630,14 +630,17 @@ def is_proxy_available(host: str = "127.0.0.1", port: int = 8899, timeout: float
 
 def resolve_ca_bundle_path(paths: ManagerPaths | None = None) -> Path | None:
     candidates = []
-    # 1. Repo root / certs / bundle.crt (manager.py is in src/agy_cli_manager, so parents[2] is repo root)
-    repo_root = Path(__file__).resolve().parents[2]
-    candidates.append(repo_root / "certs" / "bundle.crt")
-    # 2. paths.root / certs / bundle.crt
+    root = paths.root if paths else None
+    cfg = load_client_config(root)
+    if cfg.get("ca_bundle"):
+        candidates.append(Path(cfg["ca_bundle"]))
     if paths:
         candidates.append(paths.root / "certs" / "bundle.crt")
-    # 3. ~/.agy-cli-manager / certs / bundle.crt
     candidates.append(Path.home() / ".agy-cli-manager" / "certs" / "bundle.crt")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.append(repo_root / "certs" / "bundle.crt")
+
     for c in candidates:
         if c.is_file() and c.stat().st_size > 0:
             return c
@@ -695,7 +698,27 @@ def install_client_ca(paths: ManagerPaths | None, ca_pem: bytes) -> tuple[Path, 
         except Exception:
             pass
     bundle_path.write_bytes(base_cacert + b"\n" + ca_pem)
-    return bundle_path, True
+    installed_ok = True
+    if os.name == "nt":
+        try:
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    "$path = $args[0]; "
+                    "$currentCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($path); "
+                    "Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Subject -like '*AGY Local Proxy CA*' -and $_.Thumbprint -ne $currentCert.Thumbprint } | "
+                    "ForEach-Object { Remove-Item -Path \"HKCU:\\Software\\Microsoft\\SystemCertificates\\Root\\Certificates\\$($_.Thumbprint)\" -Recurse -Force -ErrorAction SilentlyContinue }; "
+                    "Import-Certificate -FilePath $path -CertStoreLocation Cert:\\CurrentUser\\Root | Out-Null; $?"
+                ),
+                str(ca_file),
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            installed_ok = "True" in res.stdout
+        except Exception:
+            installed_ok = False
+    return bundle_path, installed_ok
 
 
 def connect_gateway(
@@ -727,8 +750,8 @@ def connect_gateway(
         with urllib.request.urlopen(ca_req, timeout=timeout_seconds) as resp:
             ca_pem = resp.read()
             if ca_pem and b"BEGIN CERTIFICATE" in ca_pem:
-                bundle_path, _ = install_client_ca(paths, ca_pem)
-                ca_installed = True
+                bundle_path, installed_ok = install_client_ca(paths, ca_pem)
+                ca_installed = installed_ok
                 ca_path = str(bundle_path)
     except Exception:
         pass
@@ -825,9 +848,18 @@ def run_agy_wrapper(
             env["SSL_CERT_FILE"] = str(bundle_path)
             env["REQUESTS_CA_BUNDLE"] = str(bundle_path)
             env["NODE_EXTRA_CA_CERTS"] = str(bundle_path)
-            existing_godebug = env.get("GODEBUG", "")
-            if "x509usefallbackroots=1" not in existing_godebug:
-                env["GODEBUG"] = f"{existing_godebug},x509usefallbackroots=1".strip(",")
+            if os.name == "nt":
+                godebug = env.get("GODEBUG", "")
+                if "x509usefallbackroots" in godebug:
+                    parts = [p for p in godebug.split(",") if not p.startswith("x509usefallbackroots")]
+                    if parts:
+                        env["GODEBUG"] = ",".join(parts)
+                    else:
+                        env.pop("GODEBUG", None)
+            else:
+                existing_godebug = env.get("GODEBUG", "")
+                if "x509usefallbackroots=1" not in existing_godebug:
+                    env["GODEBUG"] = f"{existing_godebug},x509usefallbackroots=1".strip(",")
             print(f"[AGY-RUN] Proxy online -> {proxy_url} (SSL cert: {bundle_path.name})")
         else:
             print(f"[AGY-RUN] Proxy online -> {proxy_url} (No custom CA bundle detected)")
