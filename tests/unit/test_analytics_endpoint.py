@@ -76,3 +76,28 @@ class TestAnalyticsEndpoint(unittest.TestCase):
             self.assertIn("prompt_tokens", item)
             self.assertIn("completion_tokens", item)
             self.assertIn("total_tokens", item)
+
+    def test_dashboard_contains_schedule_ui(self):
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.text
+        self.assertIn("schedulePill", html)
+        self.assertIn("scheduleModal", html)
+        self.assertIn("scheduleEnabledToggle", html)
+        self.assertIn("scheduleTimesInput", html)
+        self.assertIn("fetchWarmupSchedule", html)
+
+    def test_schedule_endpoints(self):
+        resp_get = self.client.get("/api/schedule/warmup")
+        self.assertEqual(resp_get.status_code, 200)
+        data = resp_get.json()
+        self.assertIn("enabled", data)
+        self.assertIn("times", data)
+        self.assertIn("retry_state", data)
+        self.assertIn("next_run", data)
+
+        resp_post = self.client.post("/api/schedule/warmup", json={"enabled": False, "times": ["06:00", "18:00"]})
+        self.assertEqual(resp_post.status_code, 200)
+        updated = resp_post.json()
+        self.assertFalse(updated["enabled"])
+        self.assertEqual(updated["times"], ["06:00", "18:00"])

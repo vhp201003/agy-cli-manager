@@ -134,6 +134,12 @@ class TelemetryDB:
             compl_tok = tokens.get("completion_tokens") or tokens.get("completion") or 0
             total_tok = tokens.get("total_tokens") or tokens.get("total") or (prompt_tok + compl_tok)
 
+            raw_status = ev.get("status")
+            try:
+                status_code = int(raw_status) if raw_status is not None else 200
+            except (ValueError, TypeError):
+                status_code = 200
+
             rows.append((
                 ev.get("id") or str(now),
                 ev.get("created_at") or now,
@@ -143,7 +149,7 @@ class TelemetryDB:
                 ev.get("host") or "",
                 ev.get("account") or "unknown",
                 ev.get("model") or "unknown",
-                int(ev.get("status") or 200),
+                status_code,
                 ev.get("status_text") or "",
                 float(ev.get("latency_ms") or 0.0),
                 int(prompt_tok),

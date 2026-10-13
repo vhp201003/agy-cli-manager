@@ -410,19 +410,27 @@ class TokenManager:
             logger.debug(f"Could not fetch quota for {account_name}: {e}")
             return acc.get("quota")
 
-    def warmup_account(self, account_name: str, model: str | None = None) -> tuple[bool, str]:
-        acc = self._accounts.get(account_name)
+    def get_account_names(self) -> list[str]:
+        with self._lock:
+            return list(self._accounts.keys())
+
+    def warmup_account_detailed(self, account_name: str, models: list[str] | None = None) -> dict[str, dict]:
+        models_to_warm = models if models is not None else ["gemini-2.5-flash", "claude-sonnet-4-6"]
+        with self._lock:
+            acc = self._accounts.get(account_name)
         if not acc:
-            return False, "Account not found"
+            return {m: {"status": "permanent_error", "code": 404, "error": "Account not found"} for m in models_to_warm}
+
         token = acc.get("access_token")
         if not token:
-            return False, "Missing access token"
+            self.refresh_account_token(account_name)
+            with self._lock:
+                acc = self._accounts.get(account_name) or {}
+                token = acc.get("access_token")
+        if not token:
+            return {m: {"status": "permanent_error", "code": 401, "error": "Missing access token"} for m in models_to_warm}
 
-        models_to_warm = [model] if model else ["gemini-2.5-flash", "claude-sonnet-4-6"]
-        success_models = []
-        errors = []
-
-        # Pre-check: skip warming up models whose family is already exhausted on this account
+        results: dict[str, dict] = {}
         q = acc.get("quota") or {}
         gemini_exhausted = False
         claude_exhausted = False
@@ -439,22 +447,20 @@ class TokenManager:
             is_gem = "gemini" in m.lower()
             if is_gem and gemini_exhausted:
                 logger.info(f"Skipping warmup for '{account_name}' on {m} (Gemini quota exhausted)")
+                results[m] = {"status": "quota_exhausted", "code": 429, "error": "Quota Exhausted"}
                 continue
             if not is_gem and claude_exhausted:
                 logger.info(f"Skipping warmup for '{account_name}' on {m} (Claude/GPT quota exhausted)")
+                results[m] = {"status": "quota_exhausted", "code": 429, "error": "Quota Exhausted"}
                 continue
 
             payload = {
                 "project": "aicode-consumers",
                 "model": m,
                 "request": {
-                    "contents": [
-                        {"parts": [{"text": "ping"}]}
-                    ],
-                    "generationConfig": {
-                        "maxOutputTokens": 1
-                    }
-                }
+                    "contents": [{"parts": [{"text": "ping"}]}],
+                    "generationConfig": {"maxOutputTokens": 1},
+                },
             }
             req = urllib.request.Request(
                 "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent",
@@ -470,20 +476,41 @@ class TokenManager:
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 with opener.open(req, timeout=12) as resp:
                     _ = resp.read()
-                success_models.append(m)
+                results[m] = {"status": "success", "code": 200, "error": None}
                 logger.info(f"Warmup successful for account '{account_name}' on {m}")
             except urllib.error.HTTPError as err:
                 err_body = err.read().decode("utf-8", "ignore")
                 logger.warning(f"Warmup HTTP {err.code} for '{account_name}' on {m}: {err_body[:100]}")
                 if err.code == 429:
-                    # Warmup probe 429 confirms model family is exhausted; don't disable the entire account
-                    errors.append(f"{m}: 429 Quota Exhausted")
+                    results[m] = {"status": "quota_exhausted", "code": 429, "error": "Quota Exhausted"}
+                elif err.code == 401:
+                    self.refresh_account_token(account_name)
+                    results[m] = {"status": "permanent_error", "code": 401, "error": "HTTP 401 Unauthorized"}
+                elif err.code in (500, 502, 503, 504):
+                    results[m] = {"status": "transient_error", "code": err.code, "error": f"HTTP {err.code}"}
                 else:
-                    errors.append(f"{m}: HTTP {err.code}")
+                    results[m] = {"status": "permanent_error", "code": err.code, "error": f"HTTP {err.code}"}
+            except (TimeoutError, urllib.error.URLError, ConnectionError) as exc:
+                logger.error(f"Warmup transient network error for '{account_name}' on {m}: {exc}")
+                results[m] = {"status": "transient_error", "code": getattr(exc, "code", None), "error": str(exc)}
             except Exception as exc:
                 logger.error(f"Warmup exception for '{account_name}' on {m}: {exc}")
-                errors.append(f"{m}: {exc}")
+                results[m] = {"status": "transient_error", "code": None, "error": str(exc)}
 
+        return results
+
+    def warmup_account(self, account_name: str, model: str | None = None) -> tuple[bool, str]:
+        acc = self._accounts.get(account_name)
+        if not acc:
+            return False, "Account not found"
+        token = acc.get("access_token")
+        if not token:
+            return False, "Missing access token"
+
+        models = [model] if model else ["gemini-2.5-flash", "claude-sonnet-4-6"]
+        detailed = self.warmup_account_detailed(account_name, models=models)
+        success_models = [m for m, r in detailed.items() if r.get("status") == "success"]
+        errors = [f"{m}: {r.get('error') or r.get('status')}" for m, r in detailed.items() if r.get("status") != "success"]
         if success_models:
             return True, f"Triggered 5h window for {', '.join(success_models)}"
         return False, "; ".join(errors) or "Warmup failed"

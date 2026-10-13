@@ -24,6 +24,7 @@ import uuid
 import httpx
 
 try:
+    from agy_cli_manager.proxy.scheduler import WarmupScheduler
     from agy_cli_manager.proxy.token_manager import TokenManager
     from agy_cli_manager.proxy.db import get_telemetry_db
     from agy_cli_manager.proxy.proxy_server import (
@@ -43,6 +44,7 @@ try:
     from agy_cli_manager.proxy.translators.streaming import stream_gemini_to_openai
 except ImportError:
     try:
+        from .scheduler import WarmupScheduler
         from .token_manager import TokenManager
         from .db import get_telemetry_db
         from .proxy_server import (
@@ -61,6 +63,10 @@ except ImportError:
         )
         from .translators.streaming import stream_gemini_to_openai
     except ImportError:
+        try:
+            from scheduler import WarmupScheduler
+        except ImportError:
+            WarmupScheduler = None
         from token_manager import TokenManager
         from db import get_telemetry_db
         from proxy_server import (
@@ -84,6 +90,20 @@ logger = logging.getLogger("AgyProxy.FastAPI")
 tm_instance = TokenManager()
 active_subscribers: list[asyncio.Queue] = []
 main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def warmup_event_broadcaster(event: dict) -> None:
+    global main_loop
+    if main_loop and main_loop.is_running():
+        for q in list(active_subscribers):
+            main_loop.call_soon_threadsafe(q.put_nowait, event)
+
+
+warmup_scheduler = (
+    WarmupScheduler(tm_instance, tm_instance.manager_root, on_event=warmup_event_broadcaster)
+    if WarmupScheduler is not None
+    else None
+)
 
 
 def proxy_event_listener(event: dict) -> None:
@@ -126,11 +146,26 @@ async def lifespan(app: FastAPI):
         pass
 
     cron_task = asyncio.create_task(cron_token_refresh_task(interval_seconds=600))
-    yield
-    cron_task.cancel()
-    unregister_event_listener(proxy_event_listener)
-    telemetry_db.flush()
-    telemetry_db.close()
+    warmup_task = (
+        asyncio.create_task(warmup_scheduler.run_loop())
+        if warmup_scheduler is not None
+        else None
+    )
+    try:
+        yield
+    finally:
+        if warmup_scheduler is not None:
+            await warmup_scheduler.stop()
+        if warmup_task is not None:
+            warmup_task.cancel()
+            try:
+                await warmup_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        cron_task.cancel()
+        unregister_event_listener(proxy_event_listener)
+        telemetry_db.flush()
+        telemetry_db.close()
 
 
 app = FastAPI(
@@ -261,6 +296,57 @@ async def refresh_account(name: str):
 async def warmup_all(model: str | None = None):
     res = tm_instance.warmup_all_accounts(model=model)
     return {"message": "Warmup completed for all accounts", "results": res, "status": tm_instance.get_status()}
+
+
+@app.get("/api/schedule/warmup")
+async def get_warmup_schedule():
+    if warmup_scheduler is None:
+        return JSONResponse({"error": "WarmupScheduler not initialized"}, status_code=503)
+    return JSONResponse(warmup_scheduler.get_status())
+
+
+@app.post("/api/schedule/warmup")
+async def update_warmup_schedule(request: Request):
+    if warmup_scheduler is None:
+        return JSONResponse({"error": "WarmupScheduler not initialized"}, status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+
+    enabled = body.get("enabled")
+    times = body.get("times")
+    max_retries = body.get("max_retries")
+
+    kwargs = {}
+    if enabled is not None:
+        kwargs["enabled"] = bool(enabled)
+    if times is not None:
+        if isinstance(times, list):
+            kwargs["times"] = [str(t).strip() for t in times if str(t).strip()]
+        elif isinstance(times, str):
+            kwargs["times"] = [t.strip() for t in times.split(",") if t.strip()]
+    if max_retries is not None:
+        try:
+            kwargs["max_retries"] = int(max_retries)
+        except (ValueError, TypeError):
+            pass
+
+    updated = warmup_scheduler.update_config(**kwargs)
+    status = updated if isinstance(updated, dict) else warmup_scheduler.get_status()
+    return JSONResponse(status)
+
+
+@app.post("/api/schedule/warmup/trigger")
+async def trigger_warmup_schedule():
+    if warmup_scheduler is None:
+        return JSONResponse({"error": "WarmupScheduler not initialized"}, status_code=503)
+    results = await asyncio.to_thread(warmup_scheduler.trigger_manual)
+    return JSONResponse({
+        "message": "Manual warmup cycle triggered",
+        "results": results,
+        "status": warmup_scheduler.get_status(),
+    })
 
 
 @app.post("/api/accounts/{name}/warmup")
@@ -946,9 +1032,75 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
     .toast-msg.success { border-color: #22c55e; }
     .toast-msg.error { border-color: #ef4444; }
-    @keyframes toastIn {
-      from { opacity: 0; transform: translateY(12px) scale(0.96); }
-      to { opacity: 1; transform: translateY(0) scale(1); }
+    /* Vercel Geist Schedule Action Pill & Modal */
+    .schedule-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 12px;
+      height: 30px;
+      background: #0a0a0c;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 500;
+      font-family: var(--font-sans);
+      color: #ededed;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .schedule-pill:hover {
+      background: #18181b;
+      border-color: rgba(255, 255, 255, 0.28);
+    }
+    .schedule-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #666;
+      flex-shrink: 0;
+      transition: background 0.2s ease;
+    }
+    .schedule-dot.enabled {
+      background: #00e699;
+      box-shadow: 0 0 6px rgba(0, 230, 153, 0.6);
+    }
+    .schedule-dot.retrying {
+      background: #f5a623;
+      box-shadow: 0 0 6px rgba(245, 166, 35, 0.6);
+      animation: pulse 1.2s infinite;
+    }
+    .schedule-dot.disabled {
+      background: #666;
+    }
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #27272a;
+      transition: .2s;
+      border-radius: 22px;
+      border: 1px solid var(--border);
+    }
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 14px;
+      width: 14px;
+      left: 3px;
+      bottom: 3px;
+      background-color: #fff;
+      transition: .2s;
+      border-radius: 50%;
+    }
+    input:checked + .toggle-slider {
+      background-color: #0070f3;
+      border-color: #0070f3;
+    }
+    input:checked + .toggle-slider:before {
+      transform: translateX(18px);
     }
   </style>
 </head>
@@ -1000,6 +1152,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
         <span>Connect Client</span>
       </button>
+
+      <!-- Auto-Warmup Schedule Action Pill -->
+      <div class="schedule-pill" id="schedulePill" onclick="openScheduleModal()" title="Automated 5H Quota Warmup Scheduler">
+        <div class="schedule-dot disabled" id="scheduleDot"></div>
+        <span id="schedulePillText">⚡ Auto 5H: Loading...</span>
+      </div>
 
       <!-- Trigger 5H Quota Button -->
       <button onclick="warmupAllAccounts(this)" id="btnWarmup" title="Activate 5H window on all accounts">
@@ -2169,7 +2327,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeModal();
+      if (e.key === 'Escape') {
+        closeModal();
+        closeScheduleModal();
+        closeConnectModal();
+      }
     });
 
     function setFilter(type, el) {
@@ -2209,11 +2371,178 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }, 1000);
     }
 
+    function formatTime12h(timeStr) {
+      if (!timeStr) return "05:00 AM";
+      const parts = timeStr.split(':');
+      if (parts.length < 2) return timeStr;
+      let h = parseInt(parts[0], 10);
+      const m = parts[1].padStart(2, '0');
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      h = h % 12;
+      if (h === 0) h = 12;
+      return `${String(h).padStart(2, '0')}:${m} ${ampm}`;
+    }
+
+    function formatRemaining(sec) {
+      if (sec === undefined || sec === null || sec < 0) return "--";
+      if (sec === 0) return "due now";
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m`;
+    }
+
+    let warmupScheduleCache = null;
+
+    async function fetchWarmupSchedule() {
+      try {
+        const res = await fetch('/api/schedule/warmup');
+        if (!res.ok) return;
+        const status = await res.json();
+        warmupScheduleCache = status;
+        renderWarmupScheduleUI(status);
+      } catch (err) {
+        console.warn("fetchWarmupSchedule error:", err);
+      }
+    }
+
+    function renderWarmupScheduleUI(status) {
+      const pill = document.getElementById('schedulePill');
+      const dot = document.getElementById('scheduleDot');
+      const text = document.getElementById('schedulePillText');
+      if (!pill || !dot || !text) return;
+
+      dot.className = 'schedule-dot';
+
+      if (!status.enabled) {
+        dot.classList.add('disabled');
+        text.innerText = '⚡ Auto 5H: OFF';
+      } else if (status.retry_state && status.retry_state.in_retry) {
+        dot.classList.add('retrying');
+        const attempt = status.retry_state.attempt || 1;
+        const maxRetries = status.retry_state.max_retries || 3;
+        const sec = status.retry_state.next_retry_sec || 30;
+        text.innerText = `⚡ Auto 5H: Retrying ${attempt}/${maxRetries} in ${sec}s`;
+      } else {
+        dot.classList.add('enabled');
+        const firstTime = (status.times && status.times[0]) || '05:00';
+        const time12 = formatTime12h(firstTime);
+        const rem = formatRemaining(status.next_run_in_sec);
+        text.innerText = `⚡ Auto 5H: ON (${time12}) · Next in ${rem}`;
+      }
+
+      const toggle = document.getElementById('scheduleEnabledToggle');
+      const timesInput = document.getElementById('scheduleTimesInput');
+      const nextRunEl = document.getElementById('modalNextRunText');
+      const lastRunEl = document.getElementById('modalLastRunText');
+      const retryStateEl = document.getElementById('modalRetryStateText');
+
+      if (toggle && document.activeElement !== timesInput) {
+        toggle.checked = Boolean(status.enabled);
+        if (timesInput && !timesInput.value) {
+          timesInput.value = (status.times || ['05:00']).join(', ');
+        }
+      }
+      if (nextRunEl) {
+        nextRunEl.innerText = status.next_run ? `${status.next_run} (${formatRemaining(status.next_run_in_sec)})` : '--';
+      }
+      if (lastRunEl) {
+        lastRunEl.innerText = status.last_status ? status.last_status.toUpperCase() : 'NEVER RUN';
+      }
+      if (retryStateEl) {
+        if (status.retry_state && status.retry_state.in_retry) {
+          retryStateEl.innerText = `Retrying ${status.retry_state.attempt}/${status.retry_state.max_retries}`;
+          retryStateEl.style.color = 'var(--yellow)';
+        } else {
+          retryStateEl.innerText = 'Idle (Normal)';
+          retryStateEl.style.color = 'var(--text-muted)';
+        }
+      }
+    }
+
+    function openScheduleModal() {
+      const modal = document.getElementById('scheduleModal');
+      if (modal) {
+        modal.classList.add('active');
+        if (warmupScheduleCache) {
+          const timesInput = document.getElementById('scheduleTimesInput');
+          if (timesInput) timesInput.value = (warmupScheduleCache.times || ['05:00']).join(', ');
+        }
+        fetchWarmupSchedule();
+      }
+    }
+
+    function closeScheduleModal() {
+      const modal = document.getElementById('scheduleModal');
+      if (modal) modal.classList.remove('active');
+    }
+
+    async function saveScheduleConfig(btn) {
+      await handleActionWithButton(btn, async () => {
+        try {
+          const enabled = document.getElementById('scheduleEnabledToggle').checked;
+          const rawTimes = document.getElementById('scheduleTimesInput').value;
+          const times = rawTimes.split(',').map(t => t.trim()).filter(Boolean);
+
+          const res = await fetch('/api/schedule/warmup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled, times })
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const status = await res.json();
+          warmupScheduleCache = status;
+          renderWarmupScheduleUI(status);
+          showToast('Schedule settings saved successfully', 'success');
+          closeScheduleModal();
+        } catch (e) {
+          showToast(`Failed to save schedule: ${e.message}`, 'error');
+        }
+      });
+    }
+
+    async function triggerWarmupNow(btn) {
+      await handleActionWithButton(btn, async () => {
+        try {
+          showToast('Triggering warmup cycle...', 'info');
+          const res = await fetch('/api/schedule/warmup/trigger', { method: 'POST' });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          showToast('Manual warmup cycle triggered', 'success');
+          await fetchWarmupSchedule();
+          scheduleFetchStatus();
+        } catch (e) {
+          showToast(`Warmup trigger failed: ${e.message}`, 'error');
+        }
+      });
+    }
+
+    function handleWarmupSseEvent(data) {
+      if (data.type === 'warmup_retry') {
+        const attempt = data.attempt || 1;
+        const maxR = data.max_retries || 3;
+        const nextSec = data.next_retry_sec || 30;
+        showToast(`Auto 5H: Retrying ${attempt}/${maxR} in ${nextSec}s`, 'warning');
+      } else if (data.type === 'warmup_completed') {
+        const succ = data.status === 'success' || data.success === true;
+        showToast(`Auto 5H: Warmup cycle ${succ ? 'completed' : 'finished with warnings'}`, succ ? 'success' : 'warning');
+        scheduleFetchStatus();
+      } else if (data.type === 'warmup_scheduled' || data.type === 'warmup_started') {
+        showToast(`Auto 5H: Warmup cycle started`, 'info');
+      }
+      fetchWarmupSchedule();
+    }
+
     function initSSE() {
       try {
         const evtSource = new EventSource('/api/stream');
         evtSource.addEventListener('request', (e) => {
           const data = JSON.parse(e.data);
+          // SSE Discriminator safeguard
+          if (data.type === 'warmup_retry' || data.type === 'warmup_completed' || data.type === 'warmup_scheduled' || data.type === 'warmup_started') {
+            handleWarmupSseEvent(data);
+            return;
+          }
           appendLogRow(data, true);
           scheduleFetchStatus();
         });
@@ -2233,9 +2562,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     fetchStatus();
     pollLogs();
     initSSE();
+    fetchWarmupSchedule();
 
     setInterval(pollLogs, 1500);
     setInterval(fetchStatus, 8000);
+    setInterval(fetchWarmupSchedule, 15000);
 
     function openConnectModal() {
       const origin = window.location.origin;
@@ -2260,6 +2591,76 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       });
     }
   </script>
+
+  <!-- Modal Dialog: Auto-Warmup Schedule Settings -->
+  <div class="modal-backdrop" id="scheduleModal" onclick="if(event.target===this)closeScheduleModal()">
+    <div class="modal-box" style="max-width: 500px;">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span>⚡</span> Automated 5H Quota Scheduler
+        </div>
+        <button class="modal-close" onclick="closeScheduleModal()">
+          <svg class="btn-svg" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body" style="gap: 16px;">
+        <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.5;">
+          Automatically fire a 1-token probe across all accounts at scheduled local times so Google Antigravity quota buckets reset to 100% early.
+        </div>
+
+        <!-- Toggle Row -->
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px;">
+          <div>
+            <div style="font-size: 0.82rem; font-weight: 600; color: #fff;">Enable Auto-Warmup</div>
+            <div style="font-size: 0.72rem; color: var(--text-muted);">Background daemon runs in proxy process</div>
+          </div>
+          <label style="position: relative; display: inline-block; width: 42px; height: 22px; cursor: pointer;">
+            <input type="checkbox" id="scheduleEnabledToggle" style="opacity: 0; width: 0; height: 0;">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <!-- Times Input -->
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="font-size: 0.74rem; font-weight: 600; text-transform: uppercase; color: var(--text-muted); font-family: var(--font-mono);">
+            Scheduled Times (HH:MM, comma-separated)
+          </label>
+          <input type="text" id="scheduleTimesInput" placeholder="05:00" style="background: #08080a; border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 0.82rem; font-family: var(--font-mono); color: #fff; outline: none;">
+          <span style="font-size: 0.7rem; color: var(--text-muted);">Default: 05:00 (Local time). Supports multiple e.g. 05:00, 12:00</span>
+        </div>
+
+        <!-- Status Card -->
+        <div style="display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; background: #08080a; border: 1px solid var(--border); border-radius: 8px; font-family: var(--font-mono); font-size: 0.75rem;">
+          <div style="display: flex; justify-content: space-between;">
+            <span style="color: var(--text-muted);">Next Run:</span>
+            <b id="modalNextRunText" style="color: var(--accent);">--</b>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+            <span style="color: var(--text-muted);">Last Run Status:</span>
+            <span id="modalLastRunText" style="color: #fff;">--</span>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+            <span style="color: var(--text-muted);">Retry State:</span>
+            <span id="modalRetryStateText" style="color: var(--text-muted);">Idle</span>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px; gap: 10px;">
+          <button onclick="triggerWarmupNow(this)" id="btnTriggerModal" style="height: 32px; font-size: 0.76rem;" title="Run immediate probe cycle">
+            <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <span>Run Warmup Now</span>
+          </button>
+          <div style="display: flex; gap: 8px;">
+            <button onclick="closeScheduleModal()" style="height: 32px; font-size: 0.76rem;">Cancel</button>
+            <button onclick="saveScheduleConfig(this)" class="primary" style="height: 32px; font-size: 0.76rem;">
+              <span>Save Schedule</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Connect Client Modal -->
   <div id="connectModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:9999; align-items:center; justify-content:center; backdrop-filter:blur(4px);" onclick="if(event.target===this)closeConnectModal()">
