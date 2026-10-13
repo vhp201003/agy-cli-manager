@@ -854,19 +854,111 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .badge.cooldown { background: rgba(245, 158, 11, 0.08); color: var(--yellow); border: 1px solid rgba(245, 158, 11, 0.25); }
     .badge.danger { background: rgba(239, 68, 68, 0.08); color: var(--red); border: 1px solid rgba(239, 68, 68, 0.25); }
     
-    /* Quota Bars - Twin Inline Bar */
-    .quota-twin-box { background: var(--sub-card); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 6px 9px; margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
-    .twin-block { display: flex; flex-direction: column; gap: 3px; }
-    .twin-row { display: grid; grid-template-columns: 74px 1fr auto; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 0.72rem; }
-    .twin-label { font-weight: 700; white-space: nowrap; font-size: 0.7rem; }
-    .twin-bar-wrap { height: 5px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; min-width: 40px; }
-    .twin-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
-    .twin-val { text-align: right; font-weight: 600; font-size: 0.72rem; white-space: nowrap; }
-    .twin-val-sub { color: var(--text-muted); font-size: 0.65rem; font-weight: 400; margin-left: 3px; white-space: nowrap; }
-    .twin-reset-line { display: flex; justify-content: space-between; align-items: center; font-family: var(--font-mono); font-size: 0.63rem; color: var(--text-muted); padding: 0 1px; letter-spacing: -0.01em; line-height: 1.15; }
-    .reset-time-val { color: #d4d4d8; font-weight: 600; }
-    .reset-time-val.exhausted { color: var(--red); }
-    .reset-rel { color: #71717a; font-size: 0.60rem; margin-left: 2px; }
+    /* Concentric Radial Quota System - Layout B */
+    .quota-radial-box {
+      background: var(--sub-card);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 6px;
+      padding: 7px 9px;
+      margin-top: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .radial-row {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+    .radial-gauge-wrap {
+      width: 48px;
+      height: 48px;
+      position: relative;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: help;
+    }
+    .radial-gauge-wrap svg {
+      width: 48px;
+      height: 48px;
+      transform: rotate(-90deg);
+      display: block;
+    }
+    .radial-center-val {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.67rem;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      letter-spacing: -0.03em;
+      pointer-events: none;
+    }
+    .radial-info-col {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      font-family: var(--font-mono);
+    }
+    .radial-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .radial-metric-line {
+      font-size: 0.67rem;
+      color: #d4d4d8;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      line-height: 1.25;
+    }
+    .radial-metric-tag {
+      font-size: 0.62rem;
+      font-weight: 600;
+      width: 19px;
+      flex-shrink: 0;
+    }
+    .radial-metric-val {
+      font-weight: 600;
+    }
+    .radial-metric-sub {
+      color: var(--text-muted);
+      font-size: 0.63rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .radial-legend-hint {
+      font-size: 0.59rem;
+      color: #52525b;
+      font-family: var(--font-mono);
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 5px;
+      padding-top: 2px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.04);
+    }
+    .radial-legend-dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      display: inline-block;
+    }
     
     .meta-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-muted); margin-top: 7px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.04); font-family: var(--font-mono); }
 
@@ -1070,48 +1162,27 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
     .toast-msg.success { border-color: #22c55e; }
     .toast-msg.error { border-color: #ef4444; }
-    /* Vercel Geist Schedule Action Pill & Modal */
-    .schedule-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      padding: 0 12px;
-      height: 30px;
-      background: #0a0a0c;
-      border: 1px solid rgba(255, 255, 255, 0.14);
-      border-radius: 6px;
-      font-size: 0.78rem;
-      font-weight: 500;
-      font-family: var(--font-sans);
-      color: #ededed;
-      cursor: pointer;
-      user-select: none;
-      transition: all 0.15s ease;
-      white-space: nowrap;
-    }
-    .schedule-pill:hover {
-      background: #18181b;
-      border-color: rgba(255, 255, 255, 0.28);
-    }
+    /* Vercel Geist Schedule Action Indicator */
     .schedule-dot {
-      width: 7px;
-      height: 7px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
-      background: #666;
+      background: #71717a;
       flex-shrink: 0;
-      transition: background 0.2s ease;
+      transition: background 0.2s ease, box-shadow 0.2s ease;
+      display: inline-block;
     }
     .schedule-dot.enabled {
-      background: #00e699;
-      box-shadow: 0 0 6px rgba(0, 230, 153, 0.6);
+      background: #10b981;
+      box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
     }
     .schedule-dot.retrying {
-      background: #f5a623;
-      box-shadow: 0 0 6px rgba(245, 166, 35, 0.6);
+      background: #f59e0b;
+      box-shadow: 0 0 6px rgba(245, 166, 35, 0.5);
       animation: pulse 1.2s infinite;
     }
     .schedule-dot.disabled {
-      background: #666;
+      background: #71717a;
     }
     .toggle-slider {
       position: absolute;
@@ -1191,11 +1262,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <span>Connect Client</span>
       </button>
 
-      <!-- Auto-Warmup Schedule Action Pill -->
-      <div class="schedule-pill" id="schedulePill" onclick="openScheduleModal()" title="Automated 5H Quota Warmup Scheduler">
-        <div class="schedule-dot disabled" id="scheduleDot"></div>
-        <span id="schedulePillText">⚡ Auto 5H: Loading...</span>
-      </div>
+      <!-- Auto-Warmup Schedule Action Button -->
+      <button onclick="openScheduleModal()" id="schedulePill" title="Automated 5H Quota Warmup Scheduler">
+        <svg class="btn-svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span class="schedule-dot disabled" id="scheduleDot"></span>
+        <span id="schedulePillText">Auto 5H: Loading...</span>
+      </button>
 
       <!-- Trigger 5H Quota Button -->
       <button onclick="warmupAllAccounts(this)" id="btnWarmup" title="Activate 5H window on all accounts">
@@ -1571,6 +1643,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       return defaultColor;
     }
 
+    function renderConcentricRingSvg(p5h, pWk, color5h, colorWk) {
+      const p5 = Math.max(0, Math.min(100, Number(p5h) || 0));
+      const pw = Math.max(0, Math.min(100, Number(pWk) || 0));
+      const cOuter = 122.52;
+      const offOuter = cOuter - (p5 / 100) * cOuter;
+      const cInner = 84.82;
+      const offInner = cInner - (pw / 100) * cInner;
+
+      return `<svg viewBox="0 0 48 48">
+        <circle cx="24" cy="24" r="19.5" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="3.2"/>
+        <circle cx="24" cy="24" r="19.5" fill="none" stroke="${color5h}" stroke-width="3.2" stroke-linecap="round" stroke-dasharray="122.52" stroke-dashoffset="${offOuter.toFixed(2)}" style="transition:stroke-dashoffset 0.4s cubic-bezier(0.16,1,0.3,1);"/>
+        <circle cx="24" cy="24" r="13.5" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="2.6"/>
+        <circle cx="24" cy="24" r="13.5" fill="none" stroke="${colorWk}" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="84.82" stroke-dashoffset="${offInner.toFixed(2)}" style="transition:stroke-dashoffset 0.4s cubic-bezier(0.16,1,0.3,1);"/>
+      </svg>`;
+    }
+
     let accountsCache = {};
     let currentAccountFilter = 'all';
     let currentAccountView = localStorage.getItem('agy_account_view') || 'grid';
@@ -1941,10 +2029,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         const { name, acc, emailDisplay, nameDisplay, badgeClass, badgeText, isGeminiHealthy, isClaudeHealthy, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct, g5hExhausted, c5hExhausted } = item;
         const g5hColor = getBarColor(g5hEffectivePct, 'var(--accent)');
         const c5hColor = getBarColor(c5hEffectivePct, 'var(--purple)');
+        const gWkColor = gWeeklyExhausted ? 'var(--red)' : (gWeekly.percent < 25 ? 'var(--yellow)' : '#10b981');
+        const cWkColor = cWeeklyExhausted ? 'var(--red)' : (cWeekly.percent < 25 ? 'var(--yellow)' : '#10b981');
         const g5hInfo = formatResetTime(g5h.reset_time);
         const gWkInfo = formatResetTime(gWeekly.reset_time);
         const c5hInfo = formatResetTime(c5h.reset_time);
         const cWkInfo = formatResetTime(cWeekly.reset_time);
+
+        const g5hValText = gWeeklyExhausted ? '0%' : (g5h.percent <= 5.0 && g5h.reset_time ? '≤5%' : Number(g5hEffectivePct).toFixed(0) + '%');
+        const gWkValText = gWeeklyExhausted ? '≤5%' : Number(gWeekly.percent).toFixed(0) + '%';
+        const c5hValText = cWeeklyExhausted ? '0%' : (c5h.percent <= 5.0 && c5h.reset_time ? '≤5%' : Number(c5hEffectivePct).toFixed(0) + '%');
+        const cWkValText = cWeeklyExhausted ? '≤5%' : Number(cWeekly.percent).toFixed(0) + '%';
 
         const card = document.createElement('div');
         card.className = 'card';
@@ -1957,48 +2052,69 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px; flex-wrap: wrap;">
                 <span class="code-chip" style="color:var(--accent);">Profile: ${name}</span>
                 ${nameDisplay ? `<span style="font-size: 0.74rem; color: var(--text-muted);">${nameDisplay}</span>` : ''}
-                ${acc.priority_tier === 1 ? `<span class="code-chip" style="color:#00e699; border-color:rgba(0,230,153,0.3);" title="Priority 1: Draining soonest expiring 5H quota">⚡ Drain TTL: ${acc.time_until_5h_reset_formatted || 'Active'}</span>` : ''}
+                ${acc.priority_tier === 1 ? `<span class="code-chip" style="color:#10b981; border-color:rgba(16,185,129,0.3);" title="Priority 1: Draining soonest expiring 5H quota">DRAIN: ${acc.time_until_5h_reset_formatted || 'Active'}</span>` : ''}
               </div>
             </div>
             <div class="badge ${badgeClass}">${badgeText}</div>
           </div>
 
-          <!-- Dual Inline Quota Box (Primary 5H Progress Bar & Reset Times) -->
-          <div class="quota-twin-box">
-            <!-- Block 1: Gemini -->
-            <div class="twin-block" title="Gemini Quota&#10;5h: ${Number(g5hEffectivePct).toFixed(1)}% (Reset: ${g5hInfo.full})&#10;Weekly: ${Number(gWeekly.percent).toFixed(1)}% (Reset: ${gWkInfo.full})">
-              <div class="twin-row">
-                <span class="twin-label" style="color:var(--accent);">Gemini</span>
-                <div class="twin-bar-wrap">
-                  <div class="twin-bar-fill" style="width: ${g5hEffectivePct}%; background: ${g5hColor};"></div>
-                </div>
-                <div class="twin-val" style="color:${g5hColor};">
-                  ${gWeeklyExhausted ? '<span style="color:var(--red);">0%</span>' : (g5h.percent <= 5.0 && g5h.reset_time ? '<span style="color:var(--red);">≤5%</span>' : Number(g5hEffectivePct).toFixed(0) + '%')}
-                  <span class="twin-val-sub" style="color:${gWeeklyExhausted ? 'var(--red)' : 'var(--text-muted)'};">(Wk: ${gWeeklyExhausted ? '≤5%' : Number(gWeekly.percent).toFixed(0) + '%'})</span>
-                </div>
+          <!-- Concentric Radial Quota Box (Layout B) -->
+          <div class="quota-radial-box">
+            <!-- Row 1: Gemini -->
+            <div class="radial-row">
+              <div class="radial-gauge-wrap" title="Gemini Quota&#10;Outer (5H): ${g5hValText} (Reset: ${g5hInfo.full})&#10;Inner (Weekly): ${gWkValText} (Reset: ${gWkInfo.full})">
+                ${renderConcentricRingSvg(g5hEffectivePct, gWeekly.percent, g5hColor, gWkColor)}
+                <div class="radial-center-val" style="color:${g5hColor};">${g5hValText}</div>
               </div>
-              <div class="twin-reset-line">
-                <span title="Gemini 5h Reset: ${g5hInfo.full}">5h: <b class="reset-time-val ${g5hExhausted ? 'exhausted' : ''}">${g5hInfo.exact}</b>${g5hInfo.rel ? ` <span class="reset-rel">(${g5hInfo.rel})</span>` : ''}</span>
-                <span title="Gemini Weekly Reset: ${gWkInfo.full}">Wk: <b class="reset-time-val ${gWeeklyExhausted ? 'exhausted' : ''}">${gWkInfo.exact}</b>${gWkInfo.rel ? ` <span class="reset-rel">(${gWkInfo.rel})</span>` : ''}</span>
+              <div class="radial-info-col">
+                <div class="radial-title-row">
+                  <span style="color:var(--accent);">Gemini</span>
+                  <span style="color:${g5hExhausted ? 'var(--red)' : 'var(--text-muted)'}; font-size:0.62rem;">${g5hExhausted ? 'Exhausted' : (g5hInfo.rel ? `in ${g5hInfo.rel}` : 'Ready')}</span>
+                </div>
+                <div class="radial-metric-line" title="Gemini 5H Reset: ${g5hInfo.full}">
+                  <span class="radial-metric-tag" style="color:var(--accent);">5h</span>
+                  <span class="radial-metric-val" style="color:${g5hColor};">${g5hValText}</span>
+                  <span class="radial-metric-sub">· ${g5hInfo.exact}${g5hInfo.rel ? ` (${g5hInfo.rel})` : ''}</span>
+                </div>
+                <div class="radial-metric-line" title="Gemini Weekly Reset: ${gWkInfo.full}">
+                  <span class="radial-metric-tag" style="color:#10b981;">Wk</span>
+                  <span class="radial-metric-val" style="color:${gWkColor};">${gWkValText}</span>
+                  <span class="radial-metric-sub">· ${gWkInfo.exact}${gWkInfo.rel ? ` (${gWkInfo.rel})` : ''}</span>
+                </div>
               </div>
             </div>
 
-            <!-- Block 2: Claude / GPT -->
-            <div class="twin-block" title="Claude & GPT Quota&#10;5h: ${Number(c5hEffectivePct).toFixed(1)}% (Reset: ${c5hInfo.full})&#10;Weekly: ${Number(cWeekly.percent).toFixed(1)}% (Reset: ${cWkInfo.full})">
-              <div class="twin-row">
-                <span class="twin-label" style="color:var(--purple);">Claude/GPT</span>
-                <div class="twin-bar-wrap">
-                  <div class="twin-bar-fill" style="width: ${c5hEffectivePct}%; background: ${c5hColor};"></div>
+            <div style="height:1px; background:rgba(255,255,255,0.04); margin:1px 0;"></div>
+
+            <!-- Row 2: Claude / GPT -->
+            <div class="radial-row">
+              <div class="radial-gauge-wrap" title="Claude & GPT Quota&#10;Outer (5H): ${c5hValText} (Reset: ${c5hInfo.full})&#10;Inner (Weekly): ${cWkValText} (Reset: ${cWkInfo.full})">
+                ${renderConcentricRingSvg(c5hEffectivePct, cWeekly.percent, c5hColor, cWkColor)}
+                <div class="radial-center-val" style="color:${c5hColor};">${c5hValText}</div>
+              </div>
+              <div class="radial-info-col">
+                <div class="radial-title-row">
+                  <span style="color:var(--purple);">Claude · GPT</span>
+                  <span style="color:${c5hExhausted ? 'var(--red)' : 'var(--text-muted)'}; font-size:0.62rem;">${c5hExhausted ? 'Exhausted' : (c5hInfo.rel ? `in ${c5hInfo.rel}` : 'Ready')}</span>
                 </div>
-                <div class="twin-val" style="color:${c5hColor};">
-                  ${cWeeklyExhausted ? '<span style="color:var(--red);">0%</span>' : (c5h.percent <= 5.0 && c5h.reset_time ? '<span style="color:var(--red);">≤5%</span>' : Number(c5hEffectivePct).toFixed(0) + '%')}
-                  <span class="twin-val-sub" style="color:${cWeeklyExhausted ? 'var(--red)' : 'var(--text-muted)'};">(Wk: ${cWeeklyExhausted ? '≤5%' : Number(cWeekly.percent).toFixed(0) + '%'})</span>
+                <div class="radial-metric-line" title="Claude 5H Reset: ${c5hInfo.full}">
+                  <span class="radial-metric-tag" style="color:var(--purple);">5h</span>
+                  <span class="radial-metric-val" style="color:${c5hColor};">${c5hValText}</span>
+                  <span class="radial-metric-sub">· ${c5hInfo.exact}${c5hInfo.rel ? ` (${c5hInfo.rel})` : ''}</span>
+                </div>
+                <div class="radial-metric-line" title="Claude Weekly Reset: ${cWkInfo.full}">
+                  <span class="radial-metric-tag" style="color:#10b981;">Wk</span>
+                  <span class="radial-metric-val" style="color:${cWkColor};">${cWkValText}</span>
+                  <span class="radial-metric-sub">· ${cWkInfo.exact}${cWkInfo.rel ? ` (${cWkInfo.rel})` : ''}</span>
                 </div>
               </div>
-              <div class="twin-reset-line">
-                <span title="Claude 5h Reset: ${c5hInfo.full}">5h: <b class="reset-time-val ${c5hExhausted ? 'exhausted' : ''}">${c5hInfo.exact}</b>${c5hInfo.rel ? ` <span class="reset-rel">(${c5hInfo.rel})</span>` : ''}</span>
-                <span title="Claude Weekly Reset: ${cWkInfo.full}">Wk: <b class="reset-time-val ${cWeeklyExhausted ? 'exhausted' : ''}">${cWkInfo.exact}</b>${cWkInfo.rel ? ` <span class="reset-rel">(${cWkInfo.rel})</span>` : ''}</span>
-              </div>
+            </div>
+
+            <!-- Micro Legend Hint -->
+            <div class="radial-legend-hint">
+              <span><span class="radial-legend-dot" style="background:var(--accent);"></span> Outer: 5h</span>
+              <span>·</span>
+              <span><span class="radial-legend-dot" style="background:#10b981;"></span> Inner: Wk</span>
             </div>
           </div>
 
@@ -2052,7 +2168,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <div style="display:flex; align-items:center; gap:6px; margin-top:3px; flex-wrap:wrap;">
               <span class="code-chip" style="color:var(--accent); font-size:0.7rem;">${name}</span>
               ${nameDisplay ? `<span style="font-size:0.72rem; color:var(--text-muted);">${nameDisplay}</span>` : ''}
-              ${acc.priority_tier === 1 ? `<span class="code-chip" style="color:#00e699; border-color:rgba(0,230,153,0.3); font-size:0.7rem;" title="Priority 1: Draining soonest expiring 5H quota">⚡ Drain TTL: ${acc.time_until_5h_reset_formatted || 'Active'}</span>` : ''}
+              ${acc.priority_tier === 1 ? `<span class="code-chip" style="color:#10b981; border-color:rgba(16,185,129,0.3); font-size:0.7rem;" title="Priority 1: Draining soonest expiring 5H quota">DRAIN: ${acc.time_until_5h_reset_formatted || 'Active'}</span>` : ''}
             </div>
           </td>
           <td>
@@ -2483,19 +2599,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
       if (!status.enabled) {
         dot.classList.add('disabled');
-        text.innerText = '⚡ Auto 5H: OFF';
+        text.innerText = 'Auto 5H: Off';
       } else if (status.retry_state && status.retry_state.in_retry) {
         dot.classList.add('retrying');
         const attempt = status.retry_state.attempt || 1;
         const maxRetries = status.retry_state.max_retries || 3;
         const sec = status.retry_state.next_retry_sec || 30;
-        text.innerText = `⚡ Auto 5H: Retrying ${attempt}/${maxRetries} in ${sec}s`;
+        text.innerText = `Auto 5H: Retry ${attempt}/${maxRetries} (${sec}s)`;
       } else {
         dot.classList.add('enabled');
         const firstTime = (status.times && status.times[0]) || '05:00';
         const time12 = formatTime12h(firstTime);
         const rem = formatRemaining(status.next_run_in_sec);
-        text.innerText = `⚡ Auto 5H: ON (${time12}) · Next in ${rem}`;
+        text.innerText = `Auto 5H: ${time12} (${rem})`;
       }
 
       const toggle = document.getElementById('scheduleEnabledToggle');
@@ -2664,7 +2780,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="modal-box" style="max-width: 500px;">
       <div class="modal-header">
         <div class="modal-title">
-          <span>⚡</span> Automated 5H Quota Scheduler
+          <svg class="btn-svg" viewBox="0 0 24 24" style="color:var(--accent);"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>Automated 5H Quota Scheduler</span>
         </div>
         <button class="modal-close" onclick="closeScheduleModal()">
           <svg class="btn-svg" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -2734,7 +2851,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div style="background:#1e222b; border:1px solid #2d3342; border-radius:12px; width:90%; max-width:540px; padding:24px; box-shadow:0 20px 40px rgba(0,0,0,0.6); font-family:inherit; color:#fff;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
         <h3 style="margin:0; font-size:1.15rem; font-weight:600; display:flex; align-items:center; gap:8px;">
-          <span>🔗</span> Connect Developer Client
+          <svg class="btn-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <span>Connect Developer Client</span>
         </h3>
         <button onclick="closeConnectModal()" style="background:none; border:none; color:#888; font-size:1.4rem; cursor:pointer; line-height:1;">&times;</button>
       </div>
@@ -2747,7 +2865,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
       <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid #2d3342; padding-top:14px; font-size:0.85rem; color:#888;">
         <span>Manual Root CA Certificate:</span>
-        <a href="/ca.crt" download="ca.crt" style="color:#38bdf8; text-decoration:none; font-weight:500;">⬇️ Download ca.crt</a>
+        <a href="/ca.crt" download="ca.crt" style="color:#38bdf8; text-decoration:none; font-weight:500; display:inline-flex; align-items:center; gap:4px;">
+          <svg class="btn-svg" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Download ca.crt</span>
+        </a>
       </div>
     </div>
   </div>
