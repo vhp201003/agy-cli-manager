@@ -474,82 +474,92 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
                 latency_ms = round((time.time() - t0) * 1000, 1)
 
                 # 1. Handle 401 Token Expired -> Auto-refresh OAuth token immediately and retry
-                if resp.status == 401 and attempt < max_attempts - 1:
+                if resp.status == 401:
                     err_preview = resp.read(512).decode("utf-8", "ignore")
                     logger.warning(
                         f"[401 Token Expired] Account '{acc_name}' returned 401 on {path}. Auto-refreshing OAuth token..."
                     )
-                    self.token_manager.refresh_account_token(acc_name)
-                    broadcast_event({
-                        "id": event_id,
-                        "time": time.strftime("%H:%M:%S"),
-                        "method": method,
-                        "path": path,
-                        "host": host,
-                        "account": acc_name,
-                        "inbound_token": inbound_preview,
-                        "overridden_token": overridden_preview,
-                        "status": 401,
-                        "status_text": "401 Expired (Auto-refreshed)",
-                        "latency_ms": latency_ms,
-                        "body": body_str,
-                        "body_size": body_size,
-                        "retried": True,
-                    })
-                    conn.close()
-                    continue
+                    refreshed, ref_msg = self.token_manager.refresh_account_token(acc_name)
+                    if not refreshed:
+                        logger.warning(
+                            f"[401 Auth Failed] Account '{acc_name}' refresh failed ({ref_msg}). Quarantining for 30m..."
+                        )
+                        self.token_manager.quarantine_account(acc_name, reason=f"auth_refresh_failed: {ref_msg}", duration_seconds=1800)
+
+                    if attempt < max_attempts - 1:
+                        broadcast_event({
+                            "id": event_id,
+                            "time": time.strftime("%H:%M:%S"),
+                            "method": method,
+                            "path": path,
+                            "host": host,
+                            "account": acc_name,
+                            "inbound_token": inbound_preview,
+                            "overridden_token": overridden_preview,
+                            "status": 401,
+                            "status_text": "401 Expired (Auto-refreshed)" if refreshed else "401 Auth Failed (Quarantined)",
+                            "latency_ms": latency_ms,
+                            "body": body_str,
+                            "body_size": body_size,
+                            "retried": True,
+                        })
+                        conn.close()
+                        continue
 
                 # 2. Handle 429 Quota Exceeded -> Cooldown 10 mins and retry with standby
-                if resp.status == 429 and attempt < max_attempts - 1:
+                if resp.status == 429:
                     err_preview = resp.read(512).decode("utf-8", "ignore")
                     logger.warning(
                         f"[429 Quota Exceeded] Account '{acc_name}' hit rate limit on {path}. Routing to standby account..."
                     )
                     self.token_manager.mark_429(acc_name, cooldown_seconds=600)
-                    broadcast_event({
-                        "id": event_id,
-                        "time": time.strftime("%H:%M:%S"),
-                        "method": method,
-                        "path": path,
-                        "host": host,
-                        "account": acc_name,
-                        "inbound_token": inbound_preview,
-                        "overridden_token": overridden_preview,
-                        "status": 429,
-                        "status_text": "429 Quota Limit (Switched account)",
-                        "latency_ms": latency_ms,
-                        "body": body_str,
-                        "body_size": body_size,
-                        "retried": True,
-                    })
-                    conn.close()
-                    continue
+                    if attempt < max_attempts - 1:
+                        broadcast_event({
+                            "id": event_id,
+                            "time": time.strftime("%H:%M:%S"),
+                            "method": method,
+                            "path": path,
+                            "host": host,
+                            "account": acc_name,
+                            "inbound_token": inbound_preview,
+                            "overridden_token": overridden_preview,
+                            "status": 429,
+                            "status_text": "429 Quota Limit (Switched account)",
+                            "latency_ms": latency_ms,
+                            "body": body_str,
+                            "body_size": body_size,
+                            "retried": True,
+                        })
+                        conn.close()
+                        continue
 
-                # 3. Handle 403 Forbidden (e.g. Account has no valid license) -> Cooldown and switch
-                if resp.status == 403 and attempt < max_attempts - 1:
+                # 3. Handle 403 Forbidden (e.g. Account has no valid license) -> Quarantine and switch
+                if resp.status == 403:
                     err_preview = resp.read(512).decode("utf-8", "ignore")
                     logger.warning(
-                        f"[403 Forbidden] Account '{acc_name}' forbidden on {path}: {err_preview[:100]}. Routing to standby..."
+                        f"[403 Forbidden] Account '{acc_name}' forbidden on {path}: {err_preview[:100]}. Quarantining account..."
                     )
+                    self.token_manager.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
                     self.token_manager.mark_429(acc_name, cooldown_seconds=1800)
-                    broadcast_event({
-                        "id": event_id,
-                        "time": time.strftime("%H:%M:%S"),
-                        "method": method,
-                        "path": path,
-                        "host": host,
-                        "account": acc_name,
-                        "inbound_token": inbound_preview,
-                        "overridden_token": overridden_preview,
-                        "status": 403,
-                        "status_text": "403 Forbidden (Account no license, switched)",
-                        "latency_ms": latency_ms,
-                        "body": body_str,
-                        "body_size": body_size,
-                        "retried": True,
-                    })
-                    conn.close()
-                    continue
+                    if attempt < max_attempts - 1:
+                        broadcast_event({
+                            "id": event_id,
+                            "time": time.strftime("%H:%M:%S"),
+                            "method": method,
+                            "path": path,
+                            "host": host,
+                            "account": acc_name,
+                            "inbound_token": inbound_preview,
+                            "overridden_token": overridden_preview,
+                            "status": 403,
+                            "status_text": "403 Forbidden (Account no license, switched)",
+                            "latency_ms": latency_ms,
+                            "body": body_str,
+                            "body_size": body_size,
+                            "retried": True,
+                        })
+                        conn.close()
+                        continue
 
                 # 4. Stream response back to client in real-time
                 resp_line = f"HTTP/1.1 {resp.status} {resp.reason}\r\n".encode("latin1")

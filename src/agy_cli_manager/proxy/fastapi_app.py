@@ -358,8 +358,36 @@ async def warmup_account(name: str, model: str | None = None):
 
 @app.post("/api/accounts/{name}/clear-cooldown")
 async def clear_cooldown(name: str):
+    if name not in tm_instance.get_account_names():
+        return JSONResponse({"error": "Account not found"}, status_code=404)
     tm_instance.clear_cooldown(name)
     return {"message": f"Cleared cooldown for {name}", "status": tm_instance.get_status().get(name)}
+
+
+@app.post("/api/accounts/{name}/clear-quarantine")
+async def clear_quarantine(name: str):
+    if name not in tm_instance.get_account_names():
+        return JSONResponse({"error": "Account not found"}, status_code=404)
+    tm_instance.clear_quarantine(name)
+    return {"message": f"Cleared quarantine for {name}", "status": tm_instance.get_status().get(name)}
+
+
+@app.post("/api/accounts/{name}/quarantine")
+async def quarantine_account(name: str, request: Request):
+    if name not in tm_instance.get_account_names():
+        return JSONResponse({"error": "Account not found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = str(body.get("reason", "manual_quarantine"))
+    try:
+        duration = int(body.get("duration_seconds", 1800))
+    except (ValueError, TypeError):
+        duration = 1800
+    duration = max(60, min(604800, duration))
+    tm_instance.quarantine_account(name, reason=reason, duration_seconds=duration)
+    return {"message": f"Quarantined {name} for {duration}s", "status": tm_instance.get_status().get(name)}
 
 
 
@@ -469,18 +497,23 @@ async def chat_completions(request: Request):
                         last_error_resp = {"error": {"message": f"Upstream error {resp.status_code}", "type": "api_error", "param": None, "code": str(resp.status_code)}}
                     last_status_code = resp.status_code
 
-                    if resp.status_code == 401 and attempt < max_attempts - 1:
-                        tm_instance.refresh_account_token(acc_name)
-                        await resp.aclose()
-                        continue
-                    if resp.status_code == 429 and attempt < max_attempts - 1:
+                    if resp.status_code == 401:
+                        refreshed, ref_msg = tm_instance.refresh_account_token(acc_name)
+                        if not refreshed:
+                            tm_instance.quarantine_account(acc_name, reason=f"auth_refresh_failed: {ref_msg}", duration_seconds=1800)
+                        if attempt < max_attempts - 1:
+                            await resp.aclose()
+                            continue
+                    if resp.status_code == 429:
                         tm_instance.mark_429(acc_name, cooldown_seconds=600)
-                        await resp.aclose()
-                        continue
-                    if resp.status_code == 403 and attempt < max_attempts - 1:
-                        tm_instance.mark_429(acc_name, cooldown_seconds=1800)
-                        await resp.aclose()
-                        continue
+                        if attempt < max_attempts - 1:
+                            await resp.aclose()
+                            continue
+                    if resp.status_code == 403:
+                        tm_instance.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
+                        if attempt < max_attempts - 1:
+                            await resp.aclose()
+                            continue
 
                     await resp.aclose()
                     return JSONResponse(last_error_resp, status_code=last_status_code)
@@ -578,15 +611,20 @@ async def chat_completions(request: Request):
             await resp.aclose()
             await stream_client.aclose()
 
-            if resp.status_code == 401 and attempt < max_attempts - 1:
-                tm_instance.refresh_account_token(acc_name)
-                continue
-            if resp.status_code == 429 and attempt < max_attempts - 1:
+            if resp.status_code == 401:
+                refreshed, ref_msg = tm_instance.refresh_account_token(acc_name)
+                if not refreshed:
+                    tm_instance.quarantine_account(acc_name, reason=f"auth_refresh_failed: {ref_msg}", duration_seconds=1800)
+                if attempt < max_attempts - 1:
+                    continue
+            if resp.status_code == 429:
                 tm_instance.mark_429(acc_name, cooldown_seconds=600)
-                continue
-            if resp.status_code == 403 and attempt < max_attempts - 1:
-                tm_instance.mark_429(acc_name, cooldown_seconds=1800)
-                continue
+                if attempt < max_attempts - 1:
+                    continue
+            if resp.status_code == 403:
+                tm_instance.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
+                if attempt < max_attempts - 1:
+                    continue
             return JSONResponse(last_error_resp, status_code=last_status_code)
 
         stream_acc_name, stream_token, stream_resp, stream_client_ref = acc_name, access_token, resp, stream_client
@@ -1786,7 +1824,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       let badgeText = 'POOL ACTIVE';
       let isExhaustedOrLow = false;
 
-      if (acc.in_cooldown) {
+      if (acc.in_quarantine) {
+        badgeClass = 'danger';
+        badgeText = `QUARANTINE (${acc.quarantine_remaining_sec}s)`;
+        isExhaustedOrLow = true;
+      } else if (acc.in_cooldown) {
         badgeClass = 'cooldown';
         badgeText = `COOLDOWN (${acc.cooldown_remaining_sec}s)`;
         isExhaustedOrLow = true;
@@ -1912,9 +1954,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <div class="acc-email" title="${emailDisplay}">
                 <span>${emailDisplay}</span>
               </div>
-              <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+              <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px; flex-wrap: wrap;">
                 <span class="code-chip" style="color:var(--accent);">Profile: ${name}</span>
                 ${nameDisplay ? `<span style="font-size: 0.74rem; color: var(--text-muted);">${nameDisplay}</span>` : ''}
+                ${acc.priority_tier === 1 ? `<span class="code-chip" style="color:#00e699; border-color:rgba(0,230,153,0.3);" title="Priority 1: Draining soonest expiring 5H quota">⚡ Drain TTL: ${acc.time_until_5h_reset_formatted || 'Active'}</span>` : ''}
               </div>
             </div>
             <div class="badge ${badgeClass}">${badgeText}</div>
@@ -1963,6 +2006,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="meta-row">
             <span>Exp: <b>${acc.token_expires_in_min}m</b></span>
             <div style="display:flex; gap:6px;">
+              ${acc.in_quarantine ? `
+                <button onclick="clearQuarantineSingle('${name}', this)" class="card-btn" style="border-color:var(--red); color:var(--red);" title="Release from Quarantine (${acc.quarantine_reason || ''})">
+                  <span>Un-quarantine</span>
+                </button>
+              ` : ''}
               <button onclick="warmupSingle('${name}', this)" class="card-btn" title="Activate 5H for ${name}">
                 <svg class="btn-svg" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
                 <span>Activate</span>
@@ -2001,9 +2049,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         tr.innerHTML = `
           <td>
             <div style="font-weight:600; color:#fff;">${emailDisplay}</div>
-            <div style="display:flex; align-items:center; gap:6px; margin-top:3px;">
+            <div style="display:flex; align-items:center; gap:6px; margin-top:3px; flex-wrap:wrap;">
               <span class="code-chip" style="color:var(--accent); font-size:0.7rem;">${name}</span>
               ${nameDisplay ? `<span style="font-size:0.72rem; color:var(--text-muted);">${nameDisplay}</span>` : ''}
+              ${acc.priority_tier === 1 ? `<span class="code-chip" style="color:#00e699; border-color:rgba(0,230,153,0.3); font-size:0.7rem;" title="Priority 1: Draining soonest expiring 5H quota">⚡ Drain TTL: ${acc.time_until_5h_reset_formatted || 'Active'}</span>` : ''}
             </div>
           </td>
           <td>
@@ -2036,6 +2085,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <td style="text-align:right;">
             <div style="display:inline-flex; align-items:center; gap:10px;">
               <span class="sub-tag" style="margin:0;">Exp: <b>${acc.token_expires_in_min}m</b></span>
+              ${acc.in_quarantine ? `
+                <button onclick="clearQuarantineSingle('${name}', this)" class="card-btn" style="border-color:var(--red); color:var(--red);" title="Release from Quarantine">
+                  <span>Un-quarantine</span>
+                </button>
+              ` : ''}
               <button onclick="refreshSingle('${name}', this)" class="card-btn" title="Refresh Token">
                 <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 <span>Refresh</span>
@@ -2124,6 +2178,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           await fetchStatus();
         } catch (e) {
           showToast(`${name} refresh error: ${e.message}`, 'error');
+        }
+      });
+    }
+
+    async function clearQuarantineSingle(name, btn) {
+      await handleActionWithButton(btn, async () => {
+        try {
+          const res = await fetch(`/api/accounts/${name}/clear-quarantine`, { method: 'POST' });
+          const data = await res.json();
+          showToast(`${name}: ${data.message || 'Released from quarantine'}`, 'success');
+          await fetchStatus();
+        } catch (e) {
+          showToast(`${name} un-quarantine error: ${e.message}`, 'error');
         }
       });
     }

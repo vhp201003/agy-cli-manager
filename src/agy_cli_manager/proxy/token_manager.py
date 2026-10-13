@@ -20,6 +20,38 @@ logger = logging.getLogger("AgyProxy.TokenManager")
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
+def parse_reset_time_epoch(reset_time_val: str | int | float | None) -> float | None:
+    if not reset_time_val:
+        return None
+    if isinstance(reset_time_val, (int, float)):
+        return float(reset_time_val)
+    if isinstance(reset_time_val, str):
+        s = reset_time_val.strip()
+        if not s:
+            return None
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            return dt.timestamp()
+        except Exception:
+            pass
+    return None
+
+
+def format_duration_sec(sec: int | None) -> str | None:
+    if sec is None:
+        return None
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    if h > 0:
+        return f"{h}h {m}m"
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
 def _resolve_oauth_credentials(manager_root: Path) -> tuple[str | None, str | None]:
     cid = os.environ.get("GOOGLE_CLIENT_ID")
     csec = os.environ.get("GOOGLE_CLIENT_SECRET")
@@ -65,6 +97,7 @@ class TokenManager:
         self.state_file = self.manager_root / "state.json"
         self._accounts: dict[str, dict] = {}
         self._cooldowns: dict[str, float] = {}
+        self._quarantines: dict[str, dict] = {}
         self._current_active_account: str | None = None
         self.reload_accounts()
 
@@ -83,73 +116,73 @@ class TokenManager:
                 except Exception:
                     pass
 
-        for name in account_names:
-            data = self.provider.read_account(name)
-            if data and "token" in data:
-                tok = data["token"]
-                access_token = tok.get("access_token")
-                if access_token:
-                    existing = self._accounts.get(name, {})
-                    # Preserve newer in-memory token if local file was not updated yet
-                    if existing.get("access_token") and existing.get("expires_at", 0) > tok.get("expiry_timestamp", 0):
-                        continue
+            for name in account_names:
+                data = self.provider.read_account(name)
+                if data and "token" in data:
+                    tok = data["token"]
+                    access_token = tok.get("access_token")
+                    if access_token:
+                        existing = self._accounts.get(name, {})
+                        # Preserve newer in-memory token if local file was not updated yet
+                        if existing.get("access_token") and existing.get("expires_at", 0) > tok.get("expiry_timestamp", 0):
+                            continue
 
-                    # Calculate expiry
-                    expires_at = tok.get("expiry_timestamp")
-                    if not expires_at:
-                        # parse RFC3339 if available or assume 1 hr
-                        expires_at = time.time() + 3600
+                        # Calculate expiry
+                        expires_at = tok.get("expiry_timestamp")
+                        if not expires_at:
+                            # parse RFC3339 if available or assume 1 hr
+                            expires_at = time.time() + 3600
 
-                    email = data.get("email") or tok.get("email")
-                    display_name = data.get("name")
-                    id_token_jwt = data.get("id_token")
-                    if not email and id_token_jwt:
+                        email = data.get("email") or tok.get("email")
+                        display_name = data.get("name")
+                        id_token_jwt = data.get("id_token")
+                        if not email and id_token_jwt:
+                            try:
+                                import base64
+                                payload_b64 = id_token_jwt.split(".")[1]
+                                rem = len(payload_b64) % 4
+                                if rem > 0:
+                                    payload_b64 += "=" * (4 - rem)
+                                jwt_payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8"))
+                                email = jwt_payload.get("email")
+                                if not display_name:
+                                    display_name = jwt_payload.get("name")
+                            except Exception:
+                                pass
+
+                        self._accounts[name] = {
+                            "name": name,
+                            "access_token": access_token,
+                            "refresh_token": tok.get("refresh_token"),
+                            "expiry": tok.get("expiry"),
+                            "expires_at": expires_at,
+                            "email": email or name,
+                            "display_name": display_name or name,
+                            "last_refreshed": existing.get("last_refreshed", 0),
+                        }
+
+            active_blob = self.provider.read_account(active) if active else None
+            if not active_blob and hasattr(self.provider, "read_blob"):
+                active_blob = self.provider.read_blob("gemini:antigravity")
+            if active and active_blob and "token" in active_blob and "access_token" in active_blob["token"]:
+                tok = active_blob["token"]
+                if active in self._accounts:
+                    target_acc = self._accounts[active]
+                    blob_email = active_blob.get("email") or tok.get("email")
+                    id_token_jwt = active_blob.get("id_token") or tok.get("id_token")
+                    if not blob_email and id_token_jwt and "." in id_token_jwt:
                         try:
-                            import base64
-                            payload_b64 = id_token_jwt.split(".")[1]
-                            rem = len(payload_b64) % 4
-                            if rem > 0:
-                                payload_b64 += "=" * (4 - rem)
-                            jwt_payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8"))
-                            email = jwt_payload.get("email")
-                            if not display_name:
-                                display_name = jwt_payload.get("name")
+                            b64_payload = id_token_jwt.split(".")[1] + "=="
+                            jwt_payload = json.loads(base64.urlsafe_b64decode(b64_payload.encode()).decode("utf-8", errors="ignore"))
+                            blob_email = jwt_payload.get("email")
                         except Exception:
                             pass
 
-                    self._accounts[name] = {
-                        "name": name,
-                        "access_token": access_token,
-                        "refresh_token": tok.get("refresh_token"),
-                        "expiry": tok.get("expiry"),
-                        "expires_at": expires_at,
-                        "email": email or name,
-                        "display_name": display_name or name,
-                        "last_refreshed": existing.get("last_refreshed", 0),
-                    }
+                    if not blob_email or not target_acc.get("email") or blob_email.lower() == target_acc["email"].lower():
+                        target_acc["access_token"] = tok["access_token"]
 
-        active_blob = self.provider.read_account(active) if active else None
-        if not active_blob and hasattr(self.provider, "read_blob"):
-            active_blob = self.provider.read_blob("gemini:antigravity")
-        if active and active_blob and "token" in active_blob and "access_token" in active_blob["token"]:
-            tok = active_blob["token"]
-            if active in self._accounts:
-                target_acc = self._accounts[active]
-                blob_email = active_blob.get("email") or tok.get("email")
-                id_token_jwt = active_blob.get("id_token") or tok.get("id_token")
-                if not blob_email and id_token_jwt and "." in id_token_jwt:
-                    try:
-                        b64_payload = id_token_jwt.split(".")[1] + "=="
-                        jwt_payload = json.loads(base64.urlsafe_b64decode(b64_payload.encode()).decode("utf-8", errors="ignore"))
-                        blob_email = jwt_payload.get("email")
-                    except Exception:
-                        pass
-
-                if not blob_email or not target_acc.get("email") or blob_email.lower() == target_acc["email"].lower():
-                    target_acc["access_token"] = tok["access_token"]
-
-        if self._current_active_account is None and self._accounts:
-            self._current_active_account = next(iter(self._accounts))
+            if self._current_active_account is None and self._accounts:
+                self._current_active_account = next(iter(self._accounts))
 
     def refresh_account_token(self, account_name: str) -> tuple[bool, str]:
         with self._lock:
@@ -191,10 +224,11 @@ class TokenManager:
             if not new_access_token:
                 return False, "Google response missing access_token"
 
-            acc["access_token"] = new_access_token
-            acc["expires_at"] = time.time() + expires_in
-            acc["last_refreshed"] = time.time()
-            self.clear_cooldown(account_name)
+            with self._lock:
+                acc["access_token"] = new_access_token
+                acc["expires_at"] = time.time() + expires_in
+                acc["last_refreshed"] = time.time()
+                self._cooldowns.pop(account_name, None)
 
             blob = self.provider.read_account(account_name) or {}
             tok = blob.setdefault("token", {})
@@ -236,6 +270,64 @@ class TokenManager:
                 }
         return results
 
+    def quarantine_account(self, account_name: str, reason: str = "auth_failure", duration_seconds: int = 1800) -> None:
+        with self._lock:
+            now = time.time()
+            self._quarantines[account_name] = {
+                "quarantined_until": now + duration_seconds,
+                "reason": reason,
+                "quarantined_at": now,
+            }
+            logger.warning(f"Account '{account_name}' quarantined for {duration_seconds}s (reason: {reason})")
+
+    def clear_quarantine(self, account_name: str) -> None:
+        with self._lock:
+            self._quarantines.pop(account_name, None)
+            logger.info(f"Account '{account_name}' released from quarantine")
+
+    def is_quarantined(self, account_name: str) -> bool:
+        with self._lock:
+            q = self._quarantines.get(account_name)
+            if not q:
+                return False
+            if time.time() >= q.get("quarantined_until", 0):
+                self._quarantines.pop(account_name, None)
+                return False
+            return True
+
+    def get_quarantines(self) -> dict[str, dict]:
+        with self._lock:
+            now = time.time()
+            res = {}
+            for k, v in list(self._quarantines.items()):
+                if now < v.get("quarantined_until", 0):
+                    res[k] = {
+                        **v,
+                        "remaining_sec": max(0, int(v["quarantined_until"] - now)),
+                    }
+                else:
+                    self._quarantines.pop(k, None)
+            return res
+
+    def calculate_account_ttl(self, account_name: str, target_family: str = "gemini", now: float | None = None) -> tuple[int, float | None]:
+        if now is None:
+            now = time.time()
+        with self._lock:
+            acc = self._accounts.get(account_name)
+            if not acc:
+                return (3, None)
+            quota = acc.get("quota") or {}
+            five_h = quota.get(target_family, {}).get("5h", {})
+            reset_time_raw = five_h.get("reset_time")
+            reset_epoch = parse_reset_time_epoch(reset_time_raw)
+            if reset_epoch is not None and reset_epoch > now:
+                ttl = reset_epoch - now
+                return (1, ttl)
+            elif reset_epoch is not None and reset_epoch <= now:
+                return (2, 0.0)
+            else:
+                return (3, None)
+
     def get_token_by_session(self, session_key: str | None = None, model_name: str | None = None) -> tuple[str, str]:
         with self._lock:
             if not self._accounts:
@@ -248,19 +340,27 @@ class TokenManager:
                 raise RuntimeError("No accounts available in pool.")
 
             now = time.time()
+
+            # 1. Exclude quarantined accounts unless all accounts are quarantined
+            healthy_pool = [name for name in self._accounts if not self.is_quarantined(name)]
+            if not healthy_pool:
+                healthy_pool = list(self._accounts.keys())
+
+            # 2. Exclude accounts in 429 cooldown
             cooldown_ok = [
                 name
-                for name in self._accounts
+                for name in healthy_pool
                 if self._cooldowns.get(name, 0) <= now
             ]
             if not cooldown_ok:
-                oldest = min(self._cooldowns.items(), key=lambda x: x[1])[0]
+                oldest = min(healthy_pool, key=lambda x: self._cooldowns.get(x, 0))
                 cooldown_ok = [oldest]
 
             model_str = (model_name or "").lower()
             is_claude_or_gpt = any(k in model_str for k in ("claude", "sonnet", "opus", "gpt", "o1", "o3"))
             target_family = "third_party" if is_claude_or_gpt else "gemini"
 
+            # 3. Filter out quota-exhausted accounts
             alive_pool = []
             for name in cooldown_ok:
                 acc = self._accounts[name]
@@ -271,27 +371,32 @@ class TokenManager:
                 family_quota = quota.get(target_family, {})
                 weekly = family_quota.get("weekly", {})
                 five_h = family_quota.get("5h", {})
-                weekly_pct = weekly.get("percent", 100.0)
-                five_h_pct = five_h.get("percent", 100.0)
-                if weekly.get("disabled") or (weekly_pct <= 5.0 and weekly.get("reset_time")):
+                weekly_epoch = parse_reset_time_epoch(weekly.get("reset_time"))
+                five_h_epoch = parse_reset_time_epoch(five_h.get("reset_time"))
+                weekly_pct = float(weekly.get("percent", 100.0) or 0.0)
+                five_h_pct = float(five_h.get("percent", 100.0) or 0.0)
+                if weekly.get("disabled") or (weekly_pct <= 5.0 and weekly_epoch is not None and weekly_epoch > now):
                     continue
-                if five_h.get("disabled") or (five_h_pct <= 5.0 and five_h.get("reset_time")):
+                if five_h.get("disabled") or (five_h_pct <= 5.0 and five_h_epoch is not None and five_h_epoch > now):
                     continue
                 alive_pool.append(name)
 
             if not alive_pool:
                 alive_pool = cooldown_ok
 
-            if not session_key:
-                if self._current_active_account in alive_pool:
-                    chosen_name = self._current_active_account
-                else:
-                    chosen_name = alive_pool[0]
-                    self._current_active_account = chosen_name
-            else:
-                import hashlib
-                h = int(hashlib.md5(session_key.encode("utf-8")).hexdigest(), 16)
-                chosen_name = alive_pool[h % len(alive_pool)]
+            # 4. Expiry-Aware Sorting (Perishable Quota Arbitrage):
+            # Prioritize accounts whose 5H window resets soonest (lowest TTL)
+            # Tier 1 (Active 5H window expiring soonest): sorted by TTL ASC
+            # Tier 2 (Window already passed reset time): sorted by name
+            # Tier 3 (Fresh reserve with no active clock): preserved as standby
+            def _sort_key(name: str):
+                tier, ttl = self.calculate_account_ttl(name, target_family, now)
+                return (tier, ttl if ttl is not None else float("inf"), name)
+
+            alive_pool.sort(key=_sort_key)
+
+            chosen_name = alive_pool[0]
+            self._current_active_account = chosen_name
 
             acc_data = self._accounts[chosen_name]
             needs_refresh = (
@@ -434,14 +539,29 @@ class TokenManager:
         q = acc.get("quota") or {}
         gemini_exhausted = False
         claude_exhausted = False
+        now = time.time()
         if q:
             g_w = q.get("gemini", {}).get("weekly", {})
             g_5 = q.get("gemini", {}).get("5h", {})
-            gemini_exhausted = bool(g_w.get("disabled") or (g_w.get("percent", 100) <= 5.0 and g_w.get("reset_time")) or g_5.get("disabled") or (g_5.get("percent", 100) <= 5.0 and g_5.get("reset_time")))
+            gw_epoch = parse_reset_time_epoch(g_w.get("reset_time"))
+            g5_epoch = parse_reset_time_epoch(g_5.get("reset_time"))
+            gemini_exhausted = bool(
+                g_w.get("disabled")
+                or (g_w.get("percent", 100) <= 5.0 and gw_epoch is not None and gw_epoch > now)
+                or g_5.get("disabled")
+                or (g_5.get("percent", 100) <= 5.0 and g5_epoch is not None and g5_epoch > now)
+            )
 
             c_w = q.get("third_party", {}).get("weekly", {})
             c_5 = q.get("third_party", {}).get("5h", {})
-            claude_exhausted = bool(c_w.get("disabled") or (c_w.get("percent", 100) <= 5.0 and c_w.get("reset_time")) or c_5.get("disabled") or (c_5.get("percent", 100) <= 5.0 and c_5.get("reset_time")))
+            cw_epoch = parse_reset_time_epoch(c_w.get("reset_time"))
+            c5_epoch = parse_reset_time_epoch(c_5.get("reset_time"))
+            claude_exhausted = bool(
+                c_w.get("disabled")
+                or (c_w.get("percent", 100) <= 5.0 and cw_epoch is not None and cw_epoch > now)
+                or c_5.get("disabled")
+                or (c_5.get("percent", 100) <= 5.0 and c5_epoch is not None and c5_epoch > now)
+            )
 
         for m in models_to_warm:
             is_gem = "gemini" in m.lower()
@@ -537,14 +657,35 @@ class TokenManager:
             for name, acc in list(self._accounts.items()):
                 cd = self._cooldowns.get(name, 0)
                 expires_at = acc.get("expires_at", 0)
+                in_quarantine = self.is_quarantined(name)
+                quarantine_info = self._quarantines.get(name, {})
+                quarantine_remaining_sec = max(0, int(quarantine_info.get("quarantined_until", 0) - now)) if in_quarantine else 0
+                quarantine_reason = quarantine_info.get("reason") if in_quarantine else None
+
+                quota = acc.get("quota") or {}
+                five_h = quota.get("gemini", {}).get("5h", {})
+                reset_time_raw = five_h.get("reset_time")
+                reset_epoch = parse_reset_time_epoch(reset_time_raw)
+                time_until_5h_reset_sec = max(0, int(reset_epoch - now)) if (reset_epoch and reset_epoch > now) else None
+                time_until_5h_reset_formatted = format_duration_sec(time_until_5h_reset_sec)
+
+                tier, _ = self.calculate_account_ttl(name, "gemini", now)
+                priority_tier = 4 if (in_quarantine or cd > now) else tier
+
                 res[name] = {
                     "name": name,
                     "email": acc.get("email", name),
                     "display_name": acc.get("display_name", name),
-                    "is_active": cd <= now,
+                    "is_active": (cd <= now) and (not in_quarantine),
                     "is_current_runner": (name == self._current_active_account),
                     "in_cooldown": cd > now,
                     "cooldown_remaining_sec": max(0, int(cd - now)),
+                    "in_quarantine": in_quarantine,
+                    "quarantine_remaining_sec": quarantine_remaining_sec,
+                    "quarantine_reason": quarantine_reason,
+                    "time_until_5h_reset_sec": time_until_5h_reset_sec,
+                    "time_until_5h_reset_formatted": time_until_5h_reset_formatted,
+                    "priority_tier": priority_tier,
                     "token_expires_in_sec": max(0, int(expires_at - now)),
                     "token_expires_in_min": round(max(0, expires_at - now) / 60, 1),
                     "token_preview": acc["access_token"][:12] + "..." + acc["access_token"][-6:],
