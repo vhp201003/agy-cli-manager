@@ -90,6 +90,7 @@ def test_tool_response_resolution_and_turn_merging():
     assert contents[1]["role"] == "model"
     assert len(contents[1]["parts"]) == 2
     assert contents[1]["parts"][1]["functionCall"]["args"] == {"path": "package.json"}
+    assert contents[1]["parts"][1]["thoughtSignature"] == "skip_thought_signature_validator"
 
     assert contents[2]["role"] == "user"
     tool_parts = contents[2]["parts"]
@@ -215,4 +216,26 @@ def test_thinking_budget_mapping():
 
         client.post("/v1/chat/completions", json={"model": "gemini-3.8-flash", "reasoning_effort": "none", "messages": [{"role": "user", "content": "hi"}]})
         assert captured_payloads[-1]["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0
+
+
+def test_thought_signature_capture_and_injection():
+    from agy_cli_manager.proxy.translators.openai import record_thought_signature, convert_openai_messages_to_gemini
+
+    record_thought_signature("call_custom_123", "real_encrypted_sig_abc")
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call_custom_123", "type": "function", "function": {"name": "test_fn", "arguments": "{}"}},
+                {"id": "call_other_456", "type": "function", "function": {"name": "other_fn", "arguments": "{}"}},
+            ],
+        },
+    ]
+    contents, _ = convert_openai_messages_to_gemini(messages)
+    parts = contents[1]["parts"]
+    assert parts[0]["thoughtSignature"] == "real_encrypted_sig_abc"
+    assert parts[1]["thoughtSignature"] == "skip_thought_signature_validator"
+
 

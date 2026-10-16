@@ -4,6 +4,17 @@ import time
 import uuid
 
 
+_THOUGHT_SIGNATURE_CACHE: Dict[str, str] = {}
+
+
+def record_thought_signature(call_id: str, signature: str) -> None:
+    if not call_id or not signature:
+        return
+    if len(_THOUGHT_SIGNATURE_CACHE) > 2000:
+        _THOUGHT_SIGNATURE_CACHE.clear()
+    _THOUGHT_SIGNATURE_CACHE[call_id] = signature
+
+
 def convert_openai_messages_to_gemini(
     messages: List[Dict[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -94,10 +105,12 @@ def convert_openai_messages_to_gemini(
                     args = {}
             else:
                 args = {}
+            call_id = tc.get("id")
             fc = {"name": fn.get("name", ""), "args": args}
-            if tc.get("id"):
-                fc["id"] = tc["id"]
-            parts.append({"functionCall": fc})
+            if call_id:
+                fc["id"] = call_id
+            sig = _THOUGHT_SIGNATURE_CACHE.get(call_id) or "skip_thought_signature_validator"
+            parts.append({"functionCall": fc, "thoughtSignature": sig})
 
         if parts:
             can_merge = (
@@ -194,8 +207,12 @@ def convert_gemini_response_to_openai(
         for p in parts:
             fc = p.get("functionCall")
             if fc:
+                call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:24]}"
+                sig = p.get("thoughtSignature") or p.get("thought_signature")
+                if sig and call_id:
+                    record_thought_signature(call_id, sig)
                 tool_calls.append({
-                    "id": f"call_{uuid.uuid4().hex[:24]}",
+                    "id": call_id,
                     "type": "function",
                     "function": {"name": fc.get("name", ""), "arguments": json.dumps(fc.get("args", {}))},
                 })

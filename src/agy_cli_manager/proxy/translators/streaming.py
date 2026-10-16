@@ -3,6 +3,12 @@ import time
 import uuid
 from typing import AsyncGenerator
 
+try:
+    from .openai import record_thought_signature
+except ImportError:
+    from translators.openai import record_thought_signature
+
+
 async def stream_gemini_to_openai(
     gemini_stream: AsyncGenerator[bytes, None],
     model_name: str = "gemini-translated"
@@ -55,9 +61,13 @@ async def stream_gemini_to_openai(
                 for p in parts:
                     fc = p.get("functionCall")
                     if fc:
+                        call_id = fc.get("id") or f"call_{uuid.uuid4().hex[:24]}"
+                        sig = p.get("thoughtSignature") or p.get("thought_signature")
+                        if sig and call_id:
+                            record_thought_signature(call_id, sig)
                         tool_calls.append({
                             "index": tool_call_counter,
-                            "id": f"call_{uuid.uuid4().hex[:24]}",
+                            "id": call_id,
                             "type": "function",
                             "function": {
                                 "name": fc.get("name", ""),
