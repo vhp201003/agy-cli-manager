@@ -111,6 +111,28 @@ def convert_openai_messages_to_gemini(
     return contents, system_instruction
 
 
+def _sanitize_gemini_schema(schema: Any) -> Any:
+    if not isinstance(schema, dict):
+        return schema
+    cleaned = {}
+    for k, v in schema.items():
+        if k in ("additionalProperties", "$schema", "title"):
+            continue
+        if k == "type" and isinstance(v, list):
+            non_null = [t for t in v if t != "null"]
+            cleaned["type"] = non_null[0] if non_null else "string"
+            if "null" in v:
+                cleaned["nullable"] = True
+            continue
+        if isinstance(v, dict):
+            cleaned[k] = _sanitize_gemini_schema(v)
+        elif isinstance(v, list):
+            cleaned[k] = [_sanitize_gemini_schema(item) if isinstance(item, dict) else item for item in v]
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
 def convert_openai_tools_to_gemini(
     tools: List[Dict[str, Any]], tool_choice: Any = None
 ) -> Tuple[List[Dict], Optional[Dict]]:
@@ -123,7 +145,7 @@ def convert_openai_tools_to_gemini(
         if fn.get("description"):
             decl["description"] = fn["description"]
         if fn.get("parameters"):
-            decl["parameters"] = fn["parameters"]
+            decl["parameters"] = _sanitize_gemini_schema(fn["parameters"])
         declarations.append(decl)
 
     gemini_tools = [{"functionDeclarations": declarations}] if declarations else []

@@ -2,6 +2,7 @@ import json
 import pytest
 from agy_cli_manager.proxy.translators.openai import (
     convert_openai_messages_to_gemini,
+    convert_openai_tools_to_gemini,
     convert_gemini_response_to_openai,
 )
 from agy_cli_manager.proxy.translators.streaming import stream_gemini_to_openai
@@ -156,3 +157,31 @@ def test_non_streaming_thought_and_tool_conversion():
     assert choice["message"]["content"] is None
     assert choice["message"]["tool_calls"][0]["function"]["name"] == "git_status"
     assert openai_resp["model"] == "gpt-oss-120b-medium"
+
+
+def test_tools_schema_sanitization():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "properties": {
+                        "skip": {"type": ["number", "null"], "description": "offset"},
+                        "flag": {"type": ["boolean", "null"]},
+                    },
+                },
+            },
+        }
+    ]
+    gemini_tools, _ = convert_openai_tools_to_gemini(tools)
+    params = gemini_tools[0]["functionDeclarations"][0]["parameters"]
+    assert "additionalProperties" not in params
+    assert "$schema" not in params
+    assert params["properties"]["skip"]["type"] == "number"
+    assert params["properties"]["skip"]["nullable"] is True
+    assert params["properties"]["flag"]["type"] == "boolean"
+    assert params["properties"]["flag"]["nullable"] is True
