@@ -185,3 +185,34 @@ def test_tools_schema_sanitization():
     assert params["properties"]["skip"]["nullable"] is True
     assert params["properties"]["flag"]["type"] == "boolean"
     assert params["properties"]["flag"]["nullable"] is True
+
+
+def test_thinking_budget_mapping():
+    from starlette.testclient import TestClient
+    from agy_cli_manager.proxy.fastapi_app import app
+    from unittest.mock import patch, MagicMock, AsyncMock
+
+    client = TestClient(app)
+
+    captured_payloads = []
+    async def mock_send(self, req, stream=False):
+        import json
+        body_dict = json.loads(req.content.decode("utf-8"))
+        captured_payloads.append(body_dict)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.reason_phrase = "OK"
+        mock_resp.aread = AsyncMock(return_value=json.dumps([{"response": {"candidates": [{"content": {"parts": [{"text": "OK"}]}}]}}]).encode("utf-8"))
+        mock_resp.aclose = AsyncMock()
+        return mock_resp
+
+    with patch("httpx.AsyncClient.send", new=mock_send), patch("agy_cli_manager.proxy.token_manager.TokenManager.get_token_by_session", return_value=("test_acc", "fake_token")):
+        client.post("/v1/chat/completions", json={"model": "gemini-3.8-flash-low", "messages": [{"role": "user", "content": "hi"}]})
+        assert captured_payloads[-1]["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 1024
+
+        client.post("/v1/chat/completions", json={"model": "gemini-3.8-flash", "reasoning_effort": "high", "messages": [{"role": "user", "content": "hi"}]})
+        assert captured_payloads[-1]["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 24576
+
+        client.post("/v1/chat/completions", json={"model": "gemini-3.8-flash", "reasoning_effort": "none", "messages": [{"role": "user", "content": "hi"}]})
+        assert captured_payloads[-1]["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0
+

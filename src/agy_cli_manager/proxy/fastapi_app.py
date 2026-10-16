@@ -415,6 +415,7 @@ async def stream_logs(request: Request):
 
 
 _SUPPORTED_MODELS = [
+    {"id": "gemini-3.8-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
     {"id": "gemini-3.8-flash-high", "object": "model", "created": 1700000000, "owned_by": "google"},
     {"id": "gemini-3.8-flash-medium", "object": "model", "created": 1700000000, "owned_by": "google"},
     {"id": "gemini-3.8-flash-low", "object": "model", "created": 1700000000, "owned_by": "google"},
@@ -426,6 +427,7 @@ _SUPPORTED_MODELS = [
 ]
 
 _MODEL_MAP = {
+    "gemini-3.8-flash": "gemini-2.5-flash",
     "gemini-3.8-flash-high": "gemini-2.5-flash",
     "gemini-3.8-flash-medium": "gemini-2.5-flash",
     "gemini-3.8-flash-low": "gemini-2.5-flash",
@@ -489,6 +491,32 @@ async def chat_completions(request: Request):
         gemini_payload.setdefault("generationConfig", {})["maxOutputTokens"] = body["max_tokens"]
     if "top_p" in body:
         gemini_payload.setdefault("generationConfig", {})["topP"] = body["top_p"]
+
+    if upstream_model.startswith("gemini"):
+        effort = body.get("reasoning_effort")
+        if not effort:
+            if requested_model.endswith("-low"):
+                effort = "low"
+            elif requested_model.endswith("-medium"):
+                effort = "medium"
+            elif requested_model.endswith("-high"):
+                effort = "high"
+
+        if effort:
+            effort_str = str(effort).lower()
+            budget_map = {
+                "none": 0,
+                "off": 0,
+                "minimal": 1024,
+                "low": 1024,
+                "medium": 8192,
+                "high": 24576,
+                "xhigh": 24576,
+                "max": 24576,
+            }
+            budget = budget_map.get(effort_str)
+            if budget is not None:
+                gemini_payload.setdefault("generationConfig", {})["thinkingConfig"] = {"thinkingBudget": budget}
     
     if body.get("tools"):
         gemini_tools, tool_config = convert_openai_tools_to_gemini(body["tools"], body.get("tool_choice"))
