@@ -10,6 +10,14 @@ def convert_openai_messages_to_gemini(
     contents: List[Dict[str, Any]] = []
     system_parts: List[Dict] = []
 
+    tool_id_to_name: Dict[str, str] = {}
+    for m in messages:
+        for tc in m.get("tool_calls") or []:
+            t_id = tc.get("id")
+            fn_name = (tc.get("function") or {}).get("name")
+            if t_id and fn_name:
+                tool_id_to_name[t_id] = fn_name
+
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content")
@@ -24,6 +32,8 @@ def convert_openai_messages_to_gemini(
             continue
 
         if role == "tool":
+            tool_call_id = msg.get("tool_call_id")
+            func_name = msg.get("name") or (tool_id_to_name.get(tool_call_id) if tool_call_id else None) or "unknown"
             if isinstance(content, str):
                 try:
                     payload = json.loads(content)
@@ -33,10 +43,20 @@ def convert_openai_messages_to_gemini(
                 payload = content
             else:
                 payload = {"result": content}
-            contents.append({
-                "role": "user",
-                "parts": [{"functionResponse": {"name": msg.get("name", "unknown"), "response": {"content": payload}}}],
-            })
+
+            if not isinstance(payload, dict):
+                payload = {"result": payload}
+
+            part = {"functionResponse": {"name": func_name, "response": {"content": payload}}}
+            is_tool_turn = (
+                bool(contents)
+                and contents[-1]["role"] == "user"
+                and any("functionResponse" in p for p in contents[-1]["parts"])
+            )
+            if is_tool_turn:
+                contents[-1]["parts"].append(part)
+            else:
+                contents.append({"role": "user", "parts": [part]})
             continue
 
         gemini_role = "user" if role in ("user", "system") else "model"
@@ -60,15 +80,29 @@ def convert_openai_messages_to_gemini(
                             pass
 
         for tc in msg.get("tool_calls") or []:
-            fn = tc.get("function", {})
-            try:
-                args = json.loads(fn.get("arguments", "{}"))
-            except Exception:
+            fn = tc.get("function") or {}
+            raw_args = fn.get("arguments", {})
+            if isinstance(raw_args, dict):
+                args = raw_args
+            elif isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except Exception:
+                    args = {}
+            else:
                 args = {}
             parts.append({"functionCall": {"name": fn.get("name", ""), "args": args}})
 
         if parts:
-            contents.append({"role": gemini_role, "parts": parts})
+            can_merge = (
+                bool(contents)
+                and contents[-1]["role"] == gemini_role
+                and not any("functionResponse" in p for p in contents[-1]["parts"])
+            )
+            if can_merge:
+                contents[-1]["parts"].extend(parts)
+            else:
+                contents.append({"role": gemini_role, "parts": parts})
 
     system_instruction = None
     if system_parts:
@@ -126,6 +160,7 @@ def convert_gemini_response_to_openai(
         parts = cand.get("content", {}).get("parts", [])
 
         text = "".join(p.get("text", "") for p in parts if "text" in p and not p.get("thought"))
+        thought_text = "".join(p.get("text", "") for p in parts if "text" in p and p.get("thought"))
 
         tool_calls = []
         for p in parts:
@@ -142,6 +177,8 @@ def convert_gemini_response_to_openai(
             finish_reason = "tool_calls"
 
         msg: Dict[str, Any] = {"role": "assistant", "content": text or None}
+        if thought_text:
+            msg["reasoning_content"] = thought_text
         if tool_calls:
             msg["tool_calls"] = tool_calls
 

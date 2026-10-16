@@ -414,6 +414,17 @@ async def stream_logs(request: Request):
     return EventSourceResponse(event_generator())
 
 
+_SUPPORTED_MODELS = [
+    {"id": "gemini-3.8-flash-high", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-3.8-flash-medium", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-3.8-flash-low", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "claude-sonnet-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-opus-4-6-thinking", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "gpt-oss-120b-medium", "object": "model", "created": 1700000000, "owned_by": "openai"},
+    {"id": "gemini-2.5-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-2.5-pro", "object": "model", "created": 1700000000, "owned_by": "google"},
+]
+
 _MODEL_MAP = {
     "gemini-1.5-pro-latest": "gemini-2.5-flash",
     "gemini-1.5-pro": "gemini-2.5-flash",
@@ -422,10 +433,37 @@ _MODEL_MAP = {
     "gemini-1.0-pro": "gemini-2.5-flash",
     "gemini-pro": "gemini-2.5-flash",
     "gemini-pro-latest": "gemini-2.5-flash",
+    "claude-3-7-sonnet": "claude-sonnet-4-6",
+    "claude-3-5-sonnet": "claude-sonnet-4-6",
 }
 
 _CLOUDCODE_HOST = "daily-cloudcode-pa.googleapis.com"
 _CLOUDCODE_PROJECT = "aicode-consumers"
+
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": _SUPPORTED_MODELS,
+    }
+
+@app.get("/v1/models/{model_id}")
+async def get_model(model_id: str):
+    for m in _SUPPORTED_MODELS:
+        if m["id"] == model_id:
+            return m
+    return JSONResponse(
+        {"error": {"message": f"Model '{model_id}' not found", "type": "invalid_request_error"}},
+        status_code=404,
+    )
+
+def resolve_model_name(requested: str | None) -> str:
+    target = (requested or "gemini-2.5-flash").replace("-latest", "")
+    m = _MODEL_MAP.get(target, target)
+    valid_prefixes = ("gemini", "claude", "gpt")
+    if not any(m.lower().startswith(p) for p in valid_prefixes):
+        return "gemini-2.5-flash"
+    return m
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
@@ -434,10 +472,7 @@ async def chat_completions(request: Request):
     except Exception:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         
-    model_name = body.get("model", "gemini-2.5-flash")
-    if not model_name.startswith("gemini"):
-        model_name = "gemini-2.5-flash"
-    model_name = _MODEL_MAP.get(model_name, model_name).replace("-latest", "")
+    model_name = resolve_model_name(body.get("model", "gemini-2.5-flash"))
         
     contents, system_instruction = convert_openai_messages_to_gemini(body.get("messages", []))
     gemini_payload = {"contents": contents}
@@ -530,16 +565,21 @@ async def chat_completions(request: Request):
                             resp_obj = item.get("response", {})
                             for cand in resp_obj.get("candidates", []):
                                 for part in cand.get("content", {}).get("parts", []):
-                                    if part.get("thought"):
-                                        continue
-                                    if "functionCall" in part or ("text" in part and part["text"]):
+                                    if "functionCall" in part or "text" in part:
                                         combined_parts.append(part)
                                 if "finishReason" in cand:
                                     finish_reason = cand["finishReason"]
                             if "usageMetadata" in resp_obj:
                                 usage = resp_obj["usageMetadata"]
                     else:
-                        combined_parts = gemini_resp_array.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                        resp_dict = gemini_resp_array.get("response", gemini_resp_array) if isinstance(gemini_resp_array, dict) else {}
+                        candidates = resp_dict.get("candidates", [])
+                        if candidates:
+                            combined_parts = candidates[0].get("content", {}).get("parts", [])
+                            if "finishReason" in candidates[0]:
+                                finish_reason = candidates[0]["finishReason"]
+                        if "usageMetadata" in resp_dict:
+                            usage = resp_dict["usageMetadata"]
 
                     gemini_resp = {
                         "candidates": [{"content": {"parts": combined_parts or [{"text": ""}]}, "finishReason": finish_reason}],
@@ -649,7 +689,7 @@ async def chat_completions(request: Request):
                 yield chunk
 
         try:
-            async for openai_chunk in stream_gemini_to_openai(tee_stream()):
+            async for openai_chunk in stream_gemini_to_openai(tee_stream(), model_name=model_name):
                 yield openai_chunk
         finally:
             latency_ms = round((time.time() - t0) * 1000, 1)
