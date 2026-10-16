@@ -426,6 +426,9 @@ _SUPPORTED_MODELS = [
 ]
 
 _MODEL_MAP = {
+    "gemini-3.8-flash-high": "gemini-2.5-flash",
+    "gemini-3.8-flash-medium": "gemini-2.5-flash",
+    "gemini-3.8-flash-low": "gemini-2.5-flash",
     "gemini-1.5-pro-latest": "gemini-2.5-flash",
     "gemini-1.5-pro": "gemini-2.5-flash",
     "gemini-1.5-flash-latest": "gemini-2.5-flash",
@@ -472,7 +475,8 @@ async def chat_completions(request: Request):
     except Exception:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         
-    model_name = resolve_model_name(body.get("model", "gemini-2.5-flash"))
+    requested_model = body.get("model") or "gemini-2.5-flash"
+    upstream_model = resolve_model_name(requested_model)
         
     contents, system_instruction = convert_openai_messages_to_gemini(body.get("messages", []))
     gemini_payload = {"contents": contents}
@@ -502,12 +506,12 @@ async def chat_completions(request: Request):
     
     path = "/v1internal:streamGenerateContent?alt=sse" if is_stream else "/v1internal:streamGenerateContent"
     url = f"https://{_CLOUDCODE_HOST}{path}"
-    cloudcode_payload = {"project": _CLOUDCODE_PROJECT, "model": model_name, "request": gemini_payload}
+    cloudcode_payload = {"project": _CLOUDCODE_PROJECT, "model": upstream_model, "request": gemini_payload}
 
     if not is_stream:
         async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
             for attempt in range(max_attempts):
-                acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=model_name)
+                acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=upstream_model)
                 headers = {
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
@@ -585,7 +589,7 @@ async def chat_completions(request: Request):
                         "candidates": [{"content": {"parts": combined_parts or [{"text": ""}]}, "finishReason": finish_reason}],
                         "usageMetadata": usage,
                     }
-                    openai_resp = convert_gemini_response_to_openai(gemini_resp, model_name)
+                    openai_resp = convert_gemini_response_to_openai(gemini_resp, requested_model)
                 except Exception as e:
                     await resp.aclose()
                     return JSONResponse({"error": "Failed to parse Gemini response"}, status_code=502)
@@ -598,7 +602,7 @@ async def chat_completions(request: Request):
                     "path": path,
                     "host": _CLOUDCODE_HOST,
                     "account": acc_name,
-                    "model": model_name,
+                    "model": requested_model,
                     "inbound_token": "OpenAI-Mapped",
                     "overridden_token": f"Bearer {access_token[:10]}...{access_token[-5:]}",
                     "status": resp.status_code,
@@ -624,7 +628,7 @@ async def chat_completions(request: Request):
 
     for attempt in range(max_attempts):
         stream_client = httpx.AsyncClient(timeout=180.0, trust_env=False)
-        acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=model_name)
+        acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=upstream_model)
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
@@ -689,7 +693,7 @@ async def chat_completions(request: Request):
                 yield chunk
 
         try:
-            async for openai_chunk in stream_gemini_to_openai(tee_stream(), model_name=model_name):
+            async for openai_chunk in stream_gemini_to_openai(tee_stream(), model_name=requested_model):
                 yield openai_chunk
         finally:
             latency_ms = round((time.time() - t0) * 1000, 1)
@@ -704,7 +708,7 @@ async def chat_completions(request: Request):
                 "path": path,
                 "host": _CLOUDCODE_HOST,
                 "account": _acc_ref,
-                "model": model_name,
+                "model": requested_model,
                 "inbound_token": "OpenAI-Mapped",
                 "overridden_token": f"Bearer {_token_ref[:10]}...{_token_ref[-5:]}",
                 "status": _resp_ref.status_code,
