@@ -47,7 +47,10 @@ def convert_openai_messages_to_gemini(
             if not isinstance(payload, dict):
                 payload = {"result": payload}
 
-            part = {"functionResponse": {"name": func_name, "response": {"content": payload}}}
+            fn_resp = {"name": func_name, "response": {"content": payload}}
+            if tool_call_id:
+                fn_resp["id"] = tool_call_id
+            part = {"functionResponse": fn_resp}
             is_tool_turn = (
                 bool(contents)
                 and contents[-1]["role"] == "user"
@@ -91,7 +94,10 @@ def convert_openai_messages_to_gemini(
                     args = {}
             else:
                 args = {}
-            parts.append({"functionCall": {"name": fn.get("name", ""), "args": args}})
+            fc = {"name": fn.get("name", ""), "args": args}
+            if tc.get("id"):
+                fc["id"] = tc["id"]
+            parts.append({"functionCall": fc})
 
         if parts:
             can_merge = (
