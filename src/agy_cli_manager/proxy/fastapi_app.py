@@ -2141,12 +2141,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <div class="radial-info-col">
                 <div class="radial-title-row">
                   <span style="color:var(--accent);">Gemini</span>
-                  <span style="color:${g5hExhausted ? 'var(--red)' : 'var(--text-muted)'}; font-size:0.62rem;">${g5hExhausted ? 'Exhausted' : (g5hInfo.rel ? `in ${g5hInfo.rel}` : 'Ready')}</span>
+                  <span style="color:${g5hExhausted ? 'var(--red)' : 'var(--text-muted)'}; font-size:0.62rem;">${g5hExhausted ? 'Exhausted' : (g5hInfo.rel && Math.round(g5hEffectivePct) < 100 ? `in ${g5hInfo.rel}` : 'Ready')}</span>
                 </div>
                 <div class="radial-metric-line" title="Gemini 5H Reset: ${g5hInfo.full}">
                   <span class="radial-metric-tag" style="color:var(--accent);">5h</span>
                   <span class="radial-metric-val" style="color:${g5hColor};">${g5hValText}</span>
-                  <span class="radial-metric-sub">· ${g5hInfo.exact}${g5hInfo.rel ? ` (${g5hInfo.rel})` : ''}</span>
+                  <span class="radial-metric-sub">· ${Math.round(g5hEffectivePct) >= 100 ? 'Ready' : `${g5hInfo.exact}${g5hInfo.rel ? ` (${g5hInfo.rel})` : ''}`}</span>
                 </div>
                 <div class="radial-metric-line" title="Gemini Weekly Reset: ${gWkInfo.full}">
                   <span class="radial-metric-tag" style="color:#10b981;">Wk</span>
@@ -2167,12 +2167,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <div class="radial-info-col">
                 <div class="radial-title-row">
                   <span style="color:var(--purple);">Claude · GPT</span>
-                  <span style="color:${c5hExhausted ? 'var(--red)' : 'var(--text-muted)'}; font-size:0.62rem;">${c5hExhausted ? 'Exhausted' : (c5hInfo.rel ? `in ${c5hInfo.rel}` : 'Ready')}</span>
+                  <span style="color:${c5hExhausted ? 'var(--red)' : 'var(--text-muted)'}; font-size:0.62rem;">${c5hExhausted ? 'Exhausted' : (c5hInfo.rel && Math.round(c5hEffectivePct) < 100 ? `in ${c5hInfo.rel}` : 'Ready')}</span>
                 </div>
                 <div class="radial-metric-line" title="Claude 5H Reset: ${c5hInfo.full}">
                   <span class="radial-metric-tag" style="color:var(--purple);">5h</span>
                   <span class="radial-metric-val" style="color:${c5hColor};">${c5hValText}</span>
-                  <span class="radial-metric-sub">· ${c5hInfo.exact}${c5hInfo.rel ? ` (${c5hInfo.rel})` : ''}</span>
+                  <span class="radial-metric-sub">· ${Math.round(c5hEffectivePct) >= 100 ? 'Ready' : `${c5hInfo.exact}${c5hInfo.rel ? ` (${c5hInfo.rel})` : ''}`}</span>
                 </div>
                 <div class="radial-metric-line" title="Claude Weekly Reset: ${cWkInfo.full}">
                   <span class="radial-metric-tag" style="color:#10b981;">Wk</span>

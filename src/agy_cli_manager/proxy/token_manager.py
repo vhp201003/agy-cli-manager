@@ -318,13 +318,25 @@ class TokenManager:
                 return (3, None)
             quota = acc.get("quota") or {}
             five_h = quota.get(target_family, {}).get("5h", {})
+            weekly = quota.get(target_family, {}).get("weekly", {})
             reset_time_raw = five_h.get("reset_time")
             reset_epoch = parse_reset_time_epoch(reset_time_raw)
+            rem_fraction = float(five_h.get("fraction", 1.0) if five_h.get("fraction") is not None else 1.0)
+            rem_percent = float(five_h.get("percent", 100.0) if five_h.get("percent") is not None else 100.0)
+            is_disabled = bool(five_h.get("disabled") or weekly.get("disabled"))
+            if is_disabled:
+                return (3, None)
+
+            if reset_epoch is not None and reset_epoch <= now:
+                return (2, 0.0)
+
+            # Fresh reserve (>= 99.5% full) or already exhausted (<= 5.0%)
+            if rem_fraction >= 0.995 or rem_percent >= 99.5 or rem_percent <= 5.0:
+                return (3, None)
+
             if reset_epoch is not None and reset_epoch > now:
                 ttl = reset_epoch - now
                 return (1, ttl)
-            elif reset_epoch is not None and reset_epoch <= now:
-                return (2, 0.0)
             else:
                 return (3, None)
 
@@ -436,7 +448,7 @@ class TokenManager:
             return None
 
         req = urllib.request.Request(
-            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
             data=json.dumps({"project": "aicode-consumers"}).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {token}",
@@ -482,6 +494,8 @@ class TokenManager:
 
                     rem = b.get("remainingFraction")
                     pct = round(rem * 100, 2) if rem is not None else 100.0
+                    if rem is not None and rem < 1.0 and pct >= 100.0:
+                        pct = 99.99
                     is_disabled = bool(b.get("disabled", False))
                     bucket_id = str(b.get("bucketId") or "").lower()
 
@@ -666,7 +680,10 @@ class TokenManager:
                 five_h = quota.get("gemini", {}).get("5h", {})
                 reset_time_raw = five_h.get("reset_time")
                 reset_epoch = parse_reset_time_epoch(reset_time_raw)
-                time_until_5h_reset_sec = max(0, int(reset_epoch - now)) if (reset_epoch and reset_epoch > now) else None
+                rem_fraction = float(five_h.get("fraction", 1.0) if five_h.get("fraction") is not None else 1.0)
+                rem_percent = float(five_h.get("percent", 100.0) if five_h.get("percent") is not None else 100.0)
+                is_actively_draining = (rem_fraction < 0.995 and rem_percent < 99.5 and rem_percent > 5.0)
+                time_until_5h_reset_sec = max(0, int(reset_epoch - now)) if (reset_epoch and reset_epoch > now and is_actively_draining) else None
                 time_until_5h_reset_formatted = format_duration_sec(time_until_5h_reset_sec)
 
                 tier, _ = self.calculate_account_ttl(name, "gemini", now)
