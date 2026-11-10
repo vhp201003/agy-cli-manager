@@ -18,11 +18,11 @@ def test_v1_models_catalog():
     model_ids = {m["id"] for m in _SUPPORTED_MODELS}
     expected = {
         "claude-sonnet-4-6",
-        "claude-opus-4-6-thinking",
-        "gpt-oss-120b-medium",
-        "gemini-3.8-flash-high",
-        "gemini-3.8-flash-medium",
-        "gemini-3.8-flash-low",
+        "claude-opus-4-6",
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "gemini-3.8-flash",
+        "gemini-4-argon",
         "gemini-2.5-flash",
         "gemini-2.5-pro",
     }
@@ -44,8 +44,11 @@ def test_v1_models_retrieve():
 
 def test_model_preservation_for_claude_and_gpt():
     assert resolve_model_name("claude-sonnet-4-6") == "claude-sonnet-4-6"
-    assert resolve_model_name("claude-opus-4-6-thinking") == "claude-opus-4-6-thinking"
-    assert resolve_model_name("gpt-oss-120b-medium") == "gpt-oss-120b-medium"
+    assert resolve_model_name("claude-opus-4-6") == "claude-sonnet-4-6"
+    assert resolve_model_name("claude-sonnet-5-5") == "claude-sonnet-4-6"
+    assert resolve_model_name("claude-opus-5-5") == "claude-sonnet-4-6"
+    assert resolve_model_name("gemini-3.8-flash") == "gemini-2.5-flash"
+    assert resolve_model_name("gemini-4-argon") == "gemini-2.5-pro"
     assert resolve_model_name("gemini-2.5-flash") == "gemini-2.5-flash"
     assert resolve_model_name("gemini-2.5-pro") == "gemini-2.5-pro"
     assert resolve_model_name("gemini-3.8-flash-high") == "gemini-2.5-flash"

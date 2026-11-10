@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -729,11 +730,26 @@ async def stream_logs(request: Request):
 
 _SUPPORTED_MODELS = [
     {"id": "gemini-3.8-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-3.8-flash-low", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-3.8-flash-medium", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-3.8-flash-high", "object": "model", "created": 1700000000, "owned_by": "google"},
     {"id": "claude-sonnet-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-sonnet-4-6-low", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-sonnet-4-6-medium", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-sonnet-4-6-high", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-sonnet-4-6-max", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
     {"id": "claude-opus-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-opus-4-6-high", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
     {"id": "claude-sonnet-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-sonnet-5-5-high", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
     {"id": "claude-opus-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-opus-5-5-high", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
     {"id": "gemini-4-argon", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-4-argon-low", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-4-argon-medium", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-4-argon-high", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-2.5-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-2.5-pro", "object": "model", "created": 1700000000, "owned_by": "google"},
 ]
 
 _MODEL_MAP = {
@@ -743,10 +759,16 @@ _MODEL_MAP = {
     "claude-sonnet-5-5": "claude-sonnet-4-6",
     "claude-opus-5-5": "claude-sonnet-4-6",
     "gemini-4-argon": "gemini-2.5-pro",
+    "gemini-1.5-pro-latest": "gemini-2.5-flash",
+    "gemini-1.5-pro": "gemini-2.5-flash",
+    "gemini-1.5-flash-latest": "gemini-2.5-flash",
+    "gemini-1.5-flash": "gemini-2.5-flash",
+    "gemini-1.0-pro": "gemini-2.5-flash",
+    "gemini-pro": "gemini-2.5-flash",
+    "gemini-pro-latest": "gemini-2.5-flash",
+    "claude-3-5-sonnet": "claude-sonnet-4-6",
 }
 
-_CLOUDCODE_HOST = "daily-cloudcode-pa.googleapis.com"
-_CLOUDCODE_PROJECT = "aicode-consumers"
 
 @app.get("/v1/models")
 async def list_models():
@@ -754,6 +776,7 @@ async def list_models():
         "object": "list",
         "data": _SUPPORTED_MODELS,
     }
+
 
 @app.get("/v1/models/{model_id}")
 async def get_model(model_id: str):
@@ -765,13 +788,23 @@ async def get_model(model_id: str):
         status_code=404,
     )
 
+
+_CLOUDCODE_HOST = "daily-cloudcode-pa.googleapis.com"
+_CLOUDCODE_PROJECT = "aicode-consumers"
+
+_EFFORT_SUFFIX_RE = re.compile(r"-(low|medium|high|max)$", re.IGNORECASE)
+
 def resolve_model_name(requested: str | None) -> str:
-    target = (requested or "gemini-2.5-flash").replace("-latest", "")
+    target = (requested or "gemini-2.5-flash").replace("-latest", "").strip()
+    match = _EFFORT_SUFFIX_RE.search(target)
+    if match:
+        target = _EFFORT_SUFFIX_RE.sub("", target)
     m = _MODEL_MAP.get(target, target)
     valid_prefixes = ("gemini", "claude", "gpt")
     if not any(m.lower().startswith(p) for p in valid_prefixes):
         return "gemini-2.5-flash"
     return m
+
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
@@ -782,6 +815,8 @@ async def chat_completions(request: Request):
         
     requested_model = body.get("model") or "gemini-2.5-flash"
     upstream_model = resolve_model_name(requested_model)
+    match_eff = _EFFORT_SUFFIX_RE.search(requested_model)
+    suffix_effort = match_eff.group(1).lower() if match_eff else None
         
     contents, system_instruction = convert_openai_messages_to_gemini(body.get("messages", []))
     gemini_payload = {"contents": contents}
@@ -796,7 +831,7 @@ async def chat_completions(request: Request):
         gemini_payload.setdefault("generationConfig", {})["topP"] = body["top_p"]
 
     if upstream_model.startswith("gemini"):
-        effort = body.get("reasoning_effort")
+        effort = body.get("reasoning_effort") or suffix_effort
         if not effort:
             if requested_model.endswith("-low"):
                 effort = "low"
