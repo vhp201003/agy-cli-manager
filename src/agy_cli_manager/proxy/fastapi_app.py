@@ -730,35 +730,22 @@ async def stream_logs(request: Request):
 
 _SUPPORTED_MODELS = [
     {"id": "gemini-3.8-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-3.8-flash-low", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-3.8-flash-medium", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-3.8-flash-high", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "claude-sonnet-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-sonnet-4-6-low", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-sonnet-4-6-medium", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-sonnet-4-6-high", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-sonnet-4-6-max", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-opus-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-opus-4-6-high", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-sonnet-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-sonnet-5-5-high", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-opus-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-opus-5-5-high", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
     {"id": "gemini-4-argon", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-4-argon-low", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-4-argon-medium", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-4-argon-high", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "claude-sonnet-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-opus-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-sonnet-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-opus-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
     {"id": "gemini-2.5-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
     {"id": "gemini-2.5-pro", "object": "model", "created": 1700000000, "owned_by": "google"},
 ]
 
 _MODEL_MAP = {
     "gemini-3.8-flash": "gemini-2.5-flash",
+    "gemini-4-argon": "gemini-2.5-pro",
     "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-opus-4-6": "claude-sonnet-4-6",
     "claude-sonnet-5-5": "claude-sonnet-4-6",
     "claude-opus-5-5": "claude-sonnet-4-6",
-    "gemini-4-argon": "gemini-2.5-pro",
     "gemini-1.5-pro-latest": "gemini-2.5-flash",
     "gemini-1.5-pro": "gemini-2.5-flash",
     "gemini-1.5-flash-latest": "gemini-2.5-flash",
@@ -768,29 +755,6 @@ _MODEL_MAP = {
     "gemini-pro-latest": "gemini-2.5-flash",
     "claude-3-5-sonnet": "claude-sonnet-4-6",
 }
-
-
-@app.get("/v1/models")
-async def list_models():
-    return {
-        "object": "list",
-        "data": _SUPPORTED_MODELS,
-    }
-
-
-@app.get("/v1/models/{model_id}")
-async def get_model(model_id: str):
-    for m in _SUPPORTED_MODELS:
-        if m["id"] == model_id:
-            return m
-    return JSONResponse(
-        {"error": {"message": f"Model '{model_id}' not found", "type": "invalid_request_error"}},
-        status_code=404,
-    )
-
-
-_CLOUDCODE_HOST = "daily-cloudcode-pa.googleapis.com"
-_CLOUDCODE_PROJECT = "aicode-consumers"
 
 _EFFORT_SUFFIX_RE = re.compile(r"-(low|medium|high|max)$", re.IGNORECASE)
 
@@ -804,7 +768,6 @@ def resolve_model_name(requested: str | None) -> str:
     if not any(m.lower().startswith(p) for p in valid_prefixes):
         return "gemini-2.5-flash"
     return m
-
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
