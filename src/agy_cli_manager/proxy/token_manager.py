@@ -414,6 +414,7 @@ class TokenManager:
                             "expiry": tok.get("expiry"),
                             "expires_at": expires_at,
                             "email": email or name,
+                            "label_email": label_email,
                             "display_name": display_name or name,
                             "recorded_email": recorded_email,
                             "last_refreshed": existing.get("last_refreshed", 0),
