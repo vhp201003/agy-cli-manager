@@ -130,9 +130,28 @@ def convert_openai_messages_to_gemini(
     return contents, system_instruction
 
 
+_UNION_SCHEMA_KEYS = ("anyOf", "oneOf", "allOf")
+
+
 def _sanitize_gemini_schema(schema: Any) -> Any:
     if not isinstance(schema, dict):
         return schema
+    # Gemini functionDeclarations and Anthropic/Vertex tool input_schema both
+    # reject the JSON-Schema union keywords, even though plain JSON Schema
+    # draft 2020-12 allows them. Collapse the union onto its first non-null
+    # branch and keep the sibling annotations (description, default, ...).
+    for union_key in _UNION_SCHEMA_KEYS:
+        branches = schema.get(union_key)
+        if isinstance(branches, list) and branches:
+            non_null = [
+                branch for branch in branches
+                if isinstance(branch, dict) and branch.get("type") != "null"
+            ]
+            base = dict(non_null[0]) if non_null else {}
+            for sibling_key, sibling_value in schema.items():
+                if sibling_key not in _UNION_SCHEMA_KEYS and sibling_key not in base:
+                    base[sibling_key] = sibling_value
+            return _sanitize_gemini_schema(base)
     cleaned = {}
     for k, v in schema.items():
         if k in ("additionalProperties", "$schema", "title"):

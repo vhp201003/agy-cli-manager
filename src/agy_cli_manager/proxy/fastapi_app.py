@@ -776,11 +776,21 @@ def _model_owners() -> dict[str, str]:
     for mid, info in catalog.items():
         provider = str((info or {}).get("apiProvider", ""))
         if "ANTHROPIC" in provider:
-            owners[mid] = "anthropic"
+            owner = "anthropic"
         elif "OPENAI" in provider:
-            owners[mid] = "openai"
+            owner = "openai"
         else:
-            owners[mid] = "google"
+            owner = "google"
+        owners[mid] = owner
+        # Also expose clean effort-free / tier-free base model IDs when upstream
+        # only lists -tiered or -{low,medium,high} variants so custom providers
+        # (like OMP) can configure a single base model ID with /effort.
+        if mid.endswith("-tiered") and len(mid) > 7:
+            owners.setdefault(mid[:-7], owner)
+        else:
+            base_mid = _EFFORT_SUFFIX_RE.sub("", mid)
+            if base_mid != mid and base_mid:
+                owners.setdefault(base_mid, owner)
     try:
         for mid in tm_instance.declared_models():
             owners.setdefault(mid, "google")
@@ -794,14 +804,17 @@ def _model_entries(owners: dict[str, str]) -> list[dict]:
             for mid, owner in sorted(owners.items())]
 
 
-def resolve_model_name(requested: str | None) -> str:
+def resolve_model_name(requested: str | None, effort: str | None = None) -> str:
     """Return the canonical upstream id, or raise for anything not advertised.
 
-    Only a trailing effort suffix and the legacy ``-latest`` marker are
-    canonicalized; neither ever makes an unadvertised model valid. No silent
-    fallback: an unsupported name is rejected, never swapped for another model.
+    Only a trailing effort suffix, the ``-tiered`` variant advertised by
+    upstream, and the legacy ``-latest`` marker are canonicalized; none ever
+    make an unadvertised model valid. No silent fallback: an unsupported name
+    is rejected, never swapped for another model.
     """
     target = (requested or "").replace("-latest", "").strip()
+    if not target:
+        raise UnsupportedModelError(requested)
     candidates = [target]
     stripped = _EFFORT_SUFFIX_RE.sub("", target)
     if stripped != target:
@@ -811,8 +824,30 @@ def resolve_model_name(requested: str | None) -> str:
         declared = set(tm_instance.declared_models())
     except Exception:
         declared = set()
+    eff_norm = str(effort).strip().lower() if effort else ""
+    if eff_norm in ("minimal", "extra-low"):
+        eff_norm = "low"
+    elif eff_norm in ("xhigh", "max"):
+        eff_norm = "high"
+    # Prefer an exact, '-tiered', or effort-qualified match in the live upstream
+    # catalog first so base names like 'gemini-3.8-flash' or 'claude-sonnet-5-5'
+    # (with reasoning_effort) resolve to their real upstream wire ids.
     for cand in candidates:
-        if cand in known or cand in declared:
+        if cand in known:
+            return cand
+        tiered = f"{cand}-tiered"
+        if tiered in known:
+            return tiered
+        if eff_norm in ("low", "medium", "high"):
+            with_eff = f"{cand}-{eff_norm}"
+            if with_eff in known:
+                return with_eff
+        for fallback_eff in ("high", "medium", "low"):
+            with_eff = f"{cand}-{fallback_eff}"
+            if with_eff in known:
+                return with_eff
+    for cand in candidates:
+        if cand in declared:
             return cand
     raise UnsupportedModelError(requested)
 
@@ -837,6 +872,13 @@ _CLOUDCODE_HOST = "daily-cloudcode-pa.googleapis.com"
 _CLOUDCODE_PROJECT = "aicode-consumers"
 
 
+def _get_cloudcode_host(acc_name: str | None) -> str:
+    if acc_name and tm_instance:
+        acc_info = tm_instance._accounts.get(acc_name, {})
+        if acc_info.get("is_gcp_tos", False):
+            return "cloudcode-pa.googleapis.com"
+    return _CLOUDCODE_HOST
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     try:
@@ -850,15 +892,16 @@ async def chat_completions(request: Request):
             {"error": {"message": "A 'model' is required", "type": "invalid_request_error", "param": "model", "code": "missing_model"}},
             status_code=400,
         )
+    match_eff = _EFFORT_SUFFIX_RE.search(requested_model)
+    suffix_effort = match_eff.group(1).lower() if match_eff else None
+    req_effort = body.get("reasoning_effort") or suffix_effort
     try:
-        upstream_model = resolve_model_name(requested_model)
+        upstream_model = resolve_model_name(requested_model, effort=req_effort)
     except UnsupportedModelError:
         return JSONResponse(
             {"error": {"message": f"Unsupported model: {requested_model}", "type": "invalid_request_error", "param": "model", "code": "unsupported_model"}},
             status_code=400,
         )
-    match_eff = _EFFORT_SUFFIX_RE.search(requested_model)
-    suffix_effort = match_eff.group(1).lower() if match_eff else None
         
     contents, system_instruction = convert_openai_messages_to_gemini(body.get("messages", []))
     gemini_payload = {"contents": contents}
@@ -972,13 +1015,31 @@ async def chat_completions(request: Request):
                             await resp.aclose()
                             continue
                     if resp.status_code == 403:
-                        body_probe = await resp.aread()
-                        if not tm_instance.quarantine_for_tos(acc_name, body_probe):
+                        if not tm_instance.quarantine_for_tos(acc_name, resp_bytes):
                             tm_instance.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
                         if attempt < max_attempts - 1:
                             await resp.aclose()
                             continue
 
+                    broadcast_event({
+                        "id": str(uuid.uuid4())[:8],
+                        "time": time.strftime("%H:%M:%S"),
+                        "method": "POST",
+                        "path": path,
+                        "host": _CLOUDCODE_HOST,
+                        "account": acc_name,
+                        "model": requested_model,
+                        "inbound_token": "OpenAI-Mapped",
+                        "overridden_token": f"Bearer {access_token[:10]}...{access_token[-5:]}",
+                        "status": resp.status_code,
+                        "status_text": f"{resp.status_code} {resp.reason_phrase}",
+                        "latency_ms": round((time.time() - t0) * 1000, 1),
+                        "body": json.dumps(gemini_payload),
+                        "body_size": len(json.dumps(gemini_payload)),
+                        "response_preview": _format_body_for_log(resp_bytes, {}),
+                        "response_size": len(resp_bytes),
+                        "retried": attempt > 0,
+                    })
                     await resp.aclose()
                     return JSONResponse(last_error_resp, status_code=last_status_code)
 
@@ -1105,11 +1166,29 @@ async def chat_completions(request: Request):
                 if attempt < max_attempts - 1:
                     continue
             if resp.status_code == 403:
-                body_probe = await resp.aread()
-                if not tm_instance.quarantine_for_tos(acc_name, body_probe):
+                if not tm_instance.quarantine_for_tos(acc_name, resp_bytes):
                     tm_instance.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
                 if attempt < max_attempts - 1:
                     continue
+            broadcast_event({
+                "id": str(uuid.uuid4())[:8],
+                "time": time.strftime("%H:%M:%S"),
+                "method": "POST",
+                "path": path,
+                "host": _CLOUDCODE_HOST,
+                "account": acc_name,
+                "model": requested_model,
+                "inbound_token": "OpenAI-Mapped",
+                "overridden_token": f"Bearer {access_token[:10]}...{access_token[-5:]}",
+                "status": resp.status_code,
+                "status_text": f"{resp.status_code} {resp.reason_phrase}",
+                "latency_ms": 0.0,
+                "body": json.dumps(gemini_payload),
+                "body_size": len(json.dumps(gemini_payload)),
+                "response_preview": _format_body_for_log(resp_bytes, {}),
+                "response_size": len(resp_bytes),
+                "retried": attempt > 0,
+            })
             return JSONResponse(last_error_resp, status_code=last_status_code)
 
         stream_acc_name, stream_token, stream_resp, stream_client_ref = acc_name, access_token, resp, stream_client

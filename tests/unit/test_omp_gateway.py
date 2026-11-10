@@ -36,15 +36,18 @@ def anyio_backend():
 
 
 def test_v1_models_catalog(live_catalog):
-    # Advertised ids come from the upstream per-account catalog, not a hardcoded list.
+    # Advertised ids come from the upstream per-account catalog (plus clean base
+    # ids for -tiered / effort-suffixed entries), not a hardcoded list.
     from starlette.testclient import TestClient
 
     data = TestClient(fastapi_app.app).get("/v1/models").json()["data"]
-    assert {m["id"] for m in data} == set(CATALOG) | {"gemini-4-argon"}
+    assert {m["id"] for m in data} == set(CATALOG) | {"gemini-3.8-flash", "gemini-4-argon", "gpt-oss-120b"}
     owners = {m["id"]: m["owned_by"] for m in data}
     assert owners["claude-sonnet-4-6"] == "anthropic"
     assert owners["gpt-oss-120b-medium"] == "openai"
+    assert owners["gpt-oss-120b"] == "openai"
     assert owners["gemini-3.8-flash-tiered"] == "google"
+    assert owners["gemini-3.8-flash"] == "google"
 
 
 def test_v1_models_falls_back_when_catalog_unavailable(monkeypatch):
@@ -56,13 +59,28 @@ def test_v1_models_falls_back_when_catalog_unavailable(monkeypatch):
     assert ids == {"gemini-2.5-flash", "gemini-2.5-flash-lite"}
 
 
-def test_resolve_accepts_catalog_ids(live_catalog):
+def test_resolve_accepts_catalog_ids(live_catalog, monkeypatch):
     assert resolve_model_name("gemini-2.5-flash") == "gemini-2.5-flash"
     assert resolve_model_name("gemini-2.5-pro") == "gemini-2.5-pro"
     assert resolve_model_name("claude-sonnet-4-6") == "claude-sonnet-4-6"
-    # Effort suffixes map onto the advertised id rather than fabricating a new one.
+    # Effort suffixes and bare tiered family names map onto the advertised id.
     assert resolve_model_name("gemini-3.8-flash-tiered-high") == "gemini-3.8-flash-tiered"
+    assert resolve_model_name("gemini-3.8-flash") == "gemini-3.8-flash-tiered"
+    assert resolve_model_name("gemini-3.8-flash-high") == "gemini-3.8-flash-tiered"
     assert resolve_model_name("gemini-2.5-flash-latest") == "gemini-2.5-flash"
+
+    # Base model IDs map onto effort-suffixed upstream entries when effort is supplied
+    cat_with_claude55 = {
+        **CATALOG,
+        "claude-sonnet-5-5-low": {"apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX"},
+        "claude-sonnet-5-5-medium": {"apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX"},
+        "claude-sonnet-5-5-high": {"apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX"},
+    }
+    monkeypatch.setattr(fastapi_app.tm_instance, "get_model_catalog", lambda force=False: dict(cat_with_claude55))
+    assert resolve_model_name("claude-sonnet-5-5", effort="low") == "claude-sonnet-5-5-low"
+    assert resolve_model_name("claude-sonnet-5-5", effort="medium") == "claude-sonnet-5-5-medium"
+    assert resolve_model_name("claude-sonnet-5-5", effort="high") == "claude-sonnet-5-5-high"
+    assert resolve_model_name("claude-sonnet-5-5") == "claude-sonnet-5-5-high"
 
 
 def test_resolve_accepts_operator_declared_pool_models(live_catalog):
@@ -74,7 +92,7 @@ def test_resolve_accepts_operator_declared_pool_models(live_catalog):
 
 def test_resolve_rejects_ids_outside_catalog(live_catalog):
     # Names that are neither advertised nor declared are rejected; never swapped.
-    for bad in ("gemini-3.8-flash", "gemini-4-argon-tiered",
+    for bad in ("gemini-4-argon-tiered",
                 "claude-opus-4-6", "claude-sonnet-5-5", "unknown-agent-model", None, ""):
         try:
             resolve_model_name(bad)
@@ -200,6 +218,13 @@ def test_tools_schema_sanitization():
                     "properties": {
                         "skip": {"type": ["number", "null"], "description": "offset"},
                         "flag": {"type": ["boolean", "null"]},
+                        "model": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ],
+                            "description": "string or list",
+                        },
                     },
                 },
             },
@@ -213,6 +238,10 @@ def test_tools_schema_sanitization():
     assert params["properties"]["skip"]["nullable"] is True
     assert params["properties"]["flag"]["type"] == "boolean"
     assert params["properties"]["flag"]["nullable"] is True
+    model_param = params["properties"]["model"]
+    assert "anyOf" not in model_param
+    assert model_param["type"] == "string"
+    assert model_param["description"] == "string or list"
 
 
 def test_thinking_budget_mapping():
@@ -289,3 +318,12 @@ def test_unsupported_model_returns_400_without_token_call(live_catalog):
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "missing_model"
     tok.assert_not_called()
+def test_gcp_tos_host_resolution():
+    from agy_cli_manager.proxy.fastapi_app import _get_cloudcode_host, tm_instance
+    tm_instance._accounts["test_gcp"] = {"is_gcp_tos": True}
+    tm_instance._accounts["test_standard"] = {"is_gcp_tos": False}
+    assert _get_cloudcode_host("test_gcp") == "cloudcode-pa.googleapis.com"
+    assert _get_cloudcode_host("test_standard") == "daily-cloudcode-pa.googleapis.com"
+    assert _get_cloudcode_host(None) == "daily-cloudcode-pa.googleapis.com"
+    tm_instance._accounts.pop("test_gcp", None)
+    tm_instance._accounts.pop("test_standard", None)

@@ -65,11 +65,20 @@ def unregister_event_listener(listener: callable) -> None:
             EVENT_LISTENERS.remove(listener)
 
 
-def _extract_model_from_request(path: str, body_str: str) -> str:
+def _extract_model_from_request(path: str, body_str: str, raw_body: bytes | None = None) -> str:
     # 1. Search in body if json
     if body_str and "model" in body_str:
         try:
             m = re.search(r'"model"\s*:\s*"([^"]+)"', body_str)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    # 1b. If body_str was truncated (e.g., >60KB), inspect the tail of raw_body where "model" often sits
+    if raw_body and len(raw_body) > 4096:
+        try:
+            tail_text = raw_body[-8192:].decode("utf-8", "ignore")
+            m = re.search(r'"model"\s*:\s*"([^"]+)"', tail_text)
             if m:
                 return m.group(1)
         except Exception:
@@ -445,7 +454,7 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
 
         body_str = _format_body_for_log(body, headers)
         body_size = len(body) if body else 0
-        model_name = _extract_model_from_request(path, body_str)
+        model_name = _extract_model_from_request(path, body_str, raw_body=body)
         session_key = _extract_session_key(path, headers, body_str, raw_body=body)
 
         for attempt in range(max_attempts):

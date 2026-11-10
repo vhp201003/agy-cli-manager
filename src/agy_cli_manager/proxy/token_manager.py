@@ -50,15 +50,20 @@ def credential_identity(data: dict) -> tuple[str | None, str | None]:
     return (signed or None, label or None)
 
 
-_EFFORT_SUFFIXES = ("-extra-low", "-xhigh", "-minimal", "-medium", "-high", "-low", "-max", "-none")
+_EFFORT_SUFFIXES = ("-extra-low", "-xhigh", "-minimal", "-medium", "-high", "-low", "-max", "-none", "-tiered")
 
 
 def _strip_effort_suffix(model: str) -> str:
-    """Drop a trailing thinking-level suffix so ids compare by model identity."""
+    """Drop trailing thinking-level and '-tiered' suffixes so ids compare by model identity."""
     name = model.strip().lower()
-    for suffix in _EFFORT_SUFFIXES:
-        if name.endswith(suffix) and len(name) > len(suffix):
-            return name[: -len(suffix)]
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _EFFORT_SUFFIXES:
+            if name.endswith(suffix) and len(name) > len(suffix):
+                name = name[: -len(suffix)]
+                changed = True
+                break
     return name
 
 
@@ -419,6 +424,7 @@ class TokenManager:
                             "display_name": display_name or name,
                             "recorded_email": recorded_email,
                             "last_refreshed": existing.get("last_refreshed", 0),
+                            "is_gcp_tos": bool(data.get("is_gcp_tos") or claims.get("is_gcp_tos") or tok.get("is_gcp_tos")),
                         }
 
             active_blob = self.provider.read_account(active) if active else None
@@ -485,6 +491,7 @@ class TokenManager:
                 "label_email": label_email,
                 "display_name": display_name,
                 "last_refreshed": existing.get("last_refreshed", 0),
+                "is_gcp_tos": bool(data.get("is_gcp_tos") or _id_token_claims(data.get("id_token") or tok.get("id_token")).get("is_gcp_tos") or tok.get("is_gcp_tos")),
             }
             if self._current_active_account is None:
                 self._current_active_account = account_name
@@ -560,19 +567,37 @@ class TokenManager:
                 data = json.loads(resp.read().decode("utf-8"))
 
             new_access_token = data.get("access_token")
+            new_id_token = data.get("id_token")
             expires_in = int(data.get("expires_in", 3600))
             if not new_access_token:
                 return False, "Google response missing access_token"
+
+            claims = _id_token_claims(new_id_token) if new_id_token else {}
+            jwt_email = str(claims.get("email") or "").strip()
+            jwt_name = str(claims.get("name") or "").strip()
 
             with self._lock:
                 acc["access_token"] = new_access_token
                 acc["expires_at"] = time.time() + expires_in
                 acc["last_refreshed"] = time.time()
+                if jwt_email:
+                    acc["email"] = jwt_email
+                    acc["label_email"] = jwt_email
+                if jwt_name:
+                    acc["display_name"] = jwt_name
                 self._cooldowns.pop(account_name, None)
 
             blob = self.provider.read_account(account_name) or {}
             tok = blob.setdefault("token", {})
             tok["access_token"] = new_access_token
+            if new_id_token:
+                tok["id_token"] = new_id_token
+                blob["id_token"] = new_id_token
+            if jwt_email:
+                tok["email"] = jwt_email
+                blob["email"] = jwt_email
+            if jwt_name:
+                blob["name"] = jwt_name
             tok["expiry_timestamp"] = acc["expires_at"]
             tok["expiry"] = datetime.fromtimestamp(acc["expires_at"], tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             tok["refresh_token"] = refresh_token
