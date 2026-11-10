@@ -235,3 +235,25 @@ def test_tier_2_past_reset_account_routing(tmp_path: Path):
     assert chosen == "acc_past_reset"
     assert token == "tok_past"
 
+
+
+def test_credential_identity_prefers_signed_claim(tmp_path: Path):
+    """A stale `email` label must not hide which account the token belongs to."""
+    import base64
+    import json
+
+    from agy_cli_manager.proxy.token_manager import credential_identity
+
+    def fake_id_token(email: str) -> str:
+        payload = base64.urlsafe_b64encode(json.dumps({"email": email}).encode()).decode().rstrip("=")
+        return f"header.{payload}.sig"
+
+    blob = {
+        "email": "label@example.com",
+        "id_token": fake_id_token("real@example.com"),
+        "token": {"access_token": "t", "refresh_token": "r"},
+    }
+    assert credential_identity(blob) == ("real@example.com", "label@example.com")
+
+    # No id_token: fall back to the label rather than losing the identity.
+    assert credential_identity({"email": "label@example.com", "token": {}}) == (None, "label@example.com")

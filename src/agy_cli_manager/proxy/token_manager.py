@@ -22,6 +22,34 @@ logger = logging.getLogger("AgyProxy.TokenManager")
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
+def _id_token_claims(id_token: str | None) -> dict:
+    """Decode the payload of a Google id_token; {} when absent or malformed."""
+    if not id_token or id_token.count(".") < 2:
+        return {}
+    payload_b64 = id_token.split(".")[1]
+    remainder = len(payload_b64) % 4
+    if remainder:
+        payload_b64 += "=" * (4 - remainder)
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8"))
+    except (ValueError, TypeError):
+        return {}
+
+
+def credential_identity(data: dict) -> tuple[str | None, str | None]:
+    """Return (signed_email, label_email) for a stored credential blob.
+
+    The plain ``email`` field is free text that survives from whoever last wrote
+    the file, while the id_token carries Google's signature. A file that says
+    "account A" while holding account B's token is exactly how a banned account
+    stays hidden behind a healthy-looking label, so the two are reported apart.
+    """
+    inner = data.get("token") if isinstance(data.get("token"), dict) else data
+    signed = str(_id_token_claims(data.get("id_token") or inner.get("id_token")).get("email") or "").strip()
+    label = str(data.get("email") or inner.get("email") or "").strip()
+    return (signed or None, label or None)
+
+
 _EFFORT_SUFFIXES = ("-extra-low", "-xhigh", "-minimal", "-medium", "-high", "-low", "-max", "-none")
 
 
@@ -350,22 +378,18 @@ class TokenManager:
                             # parse RFC3339 if available or assume 1 hr
                             expires_at = time.time() + 3600
 
-                        email = data.get("email") or tok.get("email")
-                        display_name = data.get("name")
-                        id_token_jwt = data.get("id_token")
-                        if not email and id_token_jwt:
-                            try:
-                                import base64
-                                payload_b64 = id_token_jwt.split(".")[1]
-                                rem = len(payload_b64) % 4
-                                if rem > 0:
-                                    payload_b64 += "=" * (4 - rem)
-                                jwt_payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8"))
-                                email = jwt_payload.get("email")
-                                if not display_name:
-                                    display_name = jwt_payload.get("name")
-                            except Exception:
-                                pass
+                        signed_email, label_email = credential_identity(data)
+                        claims = _id_token_claims(data.get("id_token") or tok.get("id_token"))
+                        email = signed_email or label_email or tok.get("email")
+                        display_name = data.get("name") or claims.get("name")
+                        if signed_email and label_email and signed_email.lower() != label_email.lower():
+                            logger.warning(
+                                "Account '%s' credential says %s but its id_token belongs to %s; "
+                                "the slot is serving the latter",
+                                name,
+                                label_email,
+                                signed_email,
+                            )
 
                         recorded_email = (
                             (accounts_state.get(name) or {}).get("identity") or {}
@@ -440,8 +464,14 @@ class TokenManager:
             if not access_token:
                 return False
             expires_at = tok.get("expiry_timestamp") or (time.time() + 3600)
-            email = data.get("email") or tok.get("email") or account_name
-            display_name = data.get("name") or tok.get("name") or account_name
+            signed_email, label_email = credential_identity(data)
+            email = signed_email or label_email or tok.get("email") or account_name
+            display_name = (
+                data.get("name")
+                or _id_token_claims(data.get("id_token") or tok.get("id_token")).get("name")
+                or tok.get("name")
+                or account_name
+            )
             existing = self._accounts.get(account_name, {})
             self._accounts[account_name] = {
                 "name": account_name,
@@ -450,6 +480,7 @@ class TokenManager:
                 "expiry": tok.get("expiry"),
                 "expires_at": float(expires_at),
                 "email": email,
+                "label_email": label_email,
                 "display_name": display_name,
                 "last_refreshed": existing.get("last_refreshed", 0),
             }
@@ -1094,9 +1125,15 @@ class TokenManager:
                 tier, _ = self.calculate_account_ttl(name, "gemini", now)
                 priority_tier = 4 if (in_quarantine or cd > now) else tier
 
+                label_email = acc.get("label_email")
+                email = acc.get("email", name)
                 res[name] = {
                     "name": name,
-                    "email": acc.get("email", name),
+                    "email": email,
+                    "identity_email": label_email,
+                    "identity_mismatch": bool(
+                        label_email and email and label_email.lower() != email.lower()
+                    ),
                     "display_name": acc.get("display_name", name),
                     "is_active": (cd <= now) and (not in_quarantine),
                     "is_current_runner": (name == self._current_active_account),
