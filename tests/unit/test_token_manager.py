@@ -114,32 +114,39 @@ def test_fetch_account_quota_uses_bucket_id_for_gemini_family(tmp_path: Path):
     assert quota["third_party"]["5h"]["percent"] == 100.0
 
 
-def test_fetch_account_quota_falls_back_to_catalog_when_summary_omits_gemini(tmp_path: Path):
+def test_fetch_account_quota_sends_versioned_cli_user_agent_and_parses_gemini_weekly(tmp_path: Path):
+    # The quota API returns the Gemini group, with the account's real weekly/5h state,
+    # only to versioned antigravity/cli clients on the daily host the real app uses.
     tm = TokenManager(manager_root=tmp_path)
     tm._accounts["acc"] = {"name": "acc", "access_token": "valid-token", "expires_at": 9999999999}
-    summary = {"groups": [{
-        "displayName": "Claude and GPT models",
-        "buckets": [{"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.5, "resetTime": "2026-11-10T08:00:00Z"}],
-    }]}
-    catalog = {
-        "gemini-3-flash": {"quotaInfo": {"remainingFraction": 0.9, "resetTime": "2026-11-10T09:00:00Z"}},
-        "gemini-2.5-pro": {"quotaInfo": {"remainingFraction": 0.6, "resetTime": "2026-11-10T09:30:00Z"}},
-        "claude-sonnet-5-5-low": {"quotaInfo": {"remainingFraction": 0.1, "resetTime": "2026-11-10T08:00:00Z"}},
-    }
+    payload = {"groups": [
+        {"displayName": "Gemini Models", "buckets": [
+            {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.65, "resetTime": "2026-11-13T23:55:37Z"},
+            {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.95, "resetTime": "2026-11-10T09:59:36Z"},
+        ]},
+        {"displayName": "Claude and GPT models", "buckets": [
+            {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.24, "resetTime": "2026-11-11T21:58:09Z"},
+        ]},
+    ]}
+    seen_agents = []
+    seen_hosts = []
 
     def fake_open(req, timeout=8):
+        seen_agents.append(req.get_header("User-agent"))
+        seen_hosts.append(req.host)
         resp = MagicMock()
         resp.__enter__.return_value = resp
-        resp.read.return_value = json.dumps(summary).encode("utf-8")
+        resp.read.return_value = json.dumps(payload).encode("utf-8")
         return resp
 
-    with patch("urllib.request.OpenerDirector.open", side_effect=fake_open), \
-         patch.object(TokenManager, "_fetch_available_models", return_value=catalog):
+    with patch("urllib.request.OpenerDirector.open", side_effect=fake_open):
         quota = tm.fetch_account_quota("acc")
 
-    assert quota["gemini"]["5h"]["percent"] == 60.0
-    assert quota["gemini"]["5h"]["reset_time"] == "2026-11-10T09:30:00Z"
-    assert quota["third_party"]["5h"]["percent"] == 50.0
+    assert seen_hosts and seen_hosts[0] == "daily-cloudcode-pa.googleapis.com"
+    assert seen_agents and seen_agents[0].startswith("antigravity/cli/")
+    assert quota["gemini"]["weekly"]["percent"] == 65.0
+    assert quota["gemini"]["weekly"]["reset_time"] == "2026-11-13T23:55:37Z"
+    assert quota["third_party"]["weekly"]["percent"] == 24.0
 
 
 def test_resolve_ca_bundle_precedence(tmp_path: Path):

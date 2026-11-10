@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- fix dashboard Gemini quota stuck at 100% / no reset: when `retrieveUserQuotaSummary` omits the Gemini group, read the Gemini 5h fraction and reset time from `fetchAvailableModels` quotaInfo
+- fix Gemini quota (5h and weekly) stuck at 100% on the dashboard: `retrieveUserQuotaSummary` only returns the Gemini group to versioned `antigravity/cli/<version>` clients, so send that user agent instead of bare `antigravity`
 - add OpenAI-compatible `/v1/chat/completions` API endpoint to the proxy server (FastAPI port 8800) with both non-streaming and Server-Sent Events (SSE) streaming support
 - support bidirectional tool calling translation between OpenAI function specs and Gemini function declarations/responses
 - add automatic model translation and fallback routing for Gemini models (e.g. `gemini-1.5-*` mapped to `gemini-2.5-flash`)

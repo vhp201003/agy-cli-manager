@@ -49,10 +49,15 @@ class ManagerRegressionTests(unittest.TestCase):
         for name in ("../../outside", "../outside", ".", "..", "bad\\name"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 m.save_account_profile(self.paths, name, self.base / "source-a", overwrite=True)
-        (self.paths.accounts_dir / "linked").symlink_to(outside, target_is_directory=True)
-        with self.assertRaises(ValueError):
-            m.save_account_profile(self.paths, "linked", self.base / "source-a", overwrite=True)
-        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+        try:
+            (self.paths.accounts_dir / "linked").symlink_to(outside, target_is_directory=True)
+            has_symlink = True
+        except OSError:
+            has_symlink = False
+        if has_symlink:
+            with self.assertRaises(ValueError):
+                m.save_account_profile(self.paths, "linked", self.base / "source-a", overwrite=True)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
 
     def test_interrupted_state_write_keeps_previous_state(self) -> None:
         self.add("a")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -143,8 +144,8 @@ DEFAULT_FAMILY_FALLBACK_STRATEGY = "same-family-first"
 VALID_FAMILY_FALLBACK_STRATEGIES = ("same-family-first", "same-account-first", "strict-family")
 DEFAULT_SWITCH_DEDUPE_SECONDS = 15
 DEFAULT_SWITCH_HISTORY_LIMIT = 20
-CODE_ASSIST_BASE_URL = "https://cloudcode-pa.googleapis.com"
-CODE_ASSIST_USER_AGENT = "antigravity"
+CODE_ASSIST_BASE_URL = "https://daily-cloudcode-pa.googleapis.com"
+CODE_ASSIST_USER_AGENT = "antigravity/cli/1.5.4 (aidev_client)"
 CODE_ASSIST_LOAD_PATH = "/v1internal:loadCodeAssist"
 CODE_ASSIST_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
@@ -3895,7 +3896,11 @@ def login_account(
 ) -> str | None:
     if not name.strip():
         raise ValueError("Account name cannot be empty.")
-    if not os.isatty(sys.stdin.fileno()):
+    try:
+        is_tty = os.isatty(sys.stdin.fileno())
+    except (io.UnsupportedOperation, AttributeError, ValueError, OSError):
+        is_tty = os.isatty(0) if getattr(os, "isatty", None) else False
+    if not is_tty:
         raise ValueError("Interactive login requires a TTY.")
 
     resolved_binary = resolve_agy_binary(agy_binary)

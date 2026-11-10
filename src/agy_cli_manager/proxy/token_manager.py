@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import threading
 
 from agy_cli_manager.proxy.credential_provider import get_credential_provider, CredentialProvider
+from agy_cli_manager.manager import CODE_ASSIST_USER_AGENT
 
 logger = logging.getLogger("AgyProxy.TokenManager")
 
@@ -929,35 +930,6 @@ class TokenManager:
         with self._lock:
             self._cooldowns.pop(account_name, None)
 
-    def _apply_catalog_gemini_quota(self, parsed_quota: dict, token: str) -> None:
-        """Fill the Gemini 5h window from fetchAvailableModels.
-
-        retrieveUserQuotaSummary may omit the Gemini group; the catalog then carries
-        the shared Gemini 5h fraction/reset per model. The weekly window is not
-        exposed there and stays at its default.
-        """
-        worst = None
-        for model_id, info in self._fetch_available_models(token).items():
-            if not str(model_id).lower().startswith("gemini-") or not isinstance(info, dict):
-                continue
-            quota = info.get("quotaInfo")
-            rem = quota.get("remainingFraction") if isinstance(quota, dict) else None
-            if isinstance(rem, (int, float)) and (worst is None or rem < worst[0]):
-                worst = (float(rem), quota.get("resetTime"), str(model_id))
-        if worst is None:
-            return
-        rem, reset_time, model_id = worst
-        pct = round(rem * 100, 2)
-        if rem < 1.0 and pct >= 100.0:
-            pct = 99.99
-        parsed_quota["gemini"]["5h"] = {
-            "percent": pct,
-            "fraction": rem,
-            "disabled": False,
-            "reset_time": reset_time,
-            "desc": model_id,
-        }
-
     def fetch_account_quota(self, account_name: str, _retry: bool = True) -> dict | None:
         acc = self._accounts.get(account_name)
         if not acc:
@@ -973,12 +945,12 @@ class TokenManager:
             return None
 
         req = urllib.request.Request(
-            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
             data=json.dumps({"project": "aicode-consumers"}).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
-                "User-Agent": "antigravity",
+                "User-Agent": CODE_ASSIST_USER_AGENT,
             },
             method="POST",
         )
@@ -999,7 +971,6 @@ class TokenManager:
                 "last_synced": time.time(),
             }
 
-            gemini_in_summary = False
             for group in data.get("groups", []):
                 if not isinstance(group, dict):
                     continue
@@ -1021,7 +992,6 @@ class TokenManager:
                         target_key = "third_party"
                     else:
                         target_key = label_family
-                    gemini_in_summary = gemini_in_summary or target_key == "gemini"
                     w = b.get("window")
                     if w not in ("5h", "weekly"):
                         continue
@@ -1047,9 +1017,6 @@ class TokenManager:
                             "reset_time": b.get("resetTime") or existing_bucket.get("reset_time"),
                             "desc": b.get("description", "") or bucket_id,
                         }
-
-            if not gemini_in_summary:
-                self._apply_catalog_gemini_quota(parsed_quota, token)
 
             acc["quota"] = parsed_quota
             return parsed_quota
