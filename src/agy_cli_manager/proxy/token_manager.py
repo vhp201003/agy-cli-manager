@@ -929,6 +929,35 @@ class TokenManager:
         with self._lock:
             self._cooldowns.pop(account_name, None)
 
+    def _apply_catalog_gemini_quota(self, parsed_quota: dict, token: str) -> None:
+        """Fill the Gemini 5h window from fetchAvailableModels.
+
+        retrieveUserQuotaSummary may omit the Gemini group; the catalog then carries
+        the shared Gemini 5h fraction/reset per model. The weekly window is not
+        exposed there and stays at its default.
+        """
+        worst = None
+        for model_id, info in self._fetch_available_models(token).items():
+            if not str(model_id).lower().startswith("gemini-") or not isinstance(info, dict):
+                continue
+            quota = info.get("quotaInfo")
+            rem = quota.get("remainingFraction") if isinstance(quota, dict) else None
+            if isinstance(rem, (int, float)) and (worst is None or rem < worst[0]):
+                worst = (float(rem), quota.get("resetTime"), str(model_id))
+        if worst is None:
+            return
+        rem, reset_time, model_id = worst
+        pct = round(rem * 100, 2)
+        if rem < 1.0 and pct >= 100.0:
+            pct = 99.99
+        parsed_quota["gemini"]["5h"] = {
+            "percent": pct,
+            "fraction": rem,
+            "disabled": False,
+            "reset_time": reset_time,
+            "desc": model_id,
+        }
+
     def fetch_account_quota(self, account_name: str, _retry: bool = True) -> dict | None:
         acc = self._accounts.get(account_name)
         if not acc:
@@ -970,20 +999,29 @@ class TokenManager:
                 "last_synced": time.time(),
             }
 
+            gemini_in_summary = False
             for group in data.get("groups", []):
+                if not isinstance(group, dict):
+                    continue
                 disp_name = (group.get("displayName") or "").lower()
                 desc_name = (group.get("description") or "").lower()
                 combined_name = f"{disp_name} {desc_name}"
-
-                target_key = "gemini" if "gemini" in combined_name else "third_party"
-
                 buckets = group.get("buckets", [])
                 if not isinstance(buckets, list):
                     continue
+                label_family = "gemini" if "gemini" in combined_name else "third_party"
 
                 for b in buckets:
                     if not isinstance(b, dict):
                         continue
+                    bucket_id = str(b.get("bucketId") or "").lower()
+                    if bucket_id.startswith("gemini-"):
+                        target_key = "gemini"
+                    elif bucket_id.startswith("3p-"):
+                        target_key = "third_party"
+                    else:
+                        target_key = label_family
+                    gemini_in_summary = gemini_in_summary or target_key == "gemini"
                     w = b.get("window")
                     if w not in ("5h", "weekly"):
                         continue
@@ -993,7 +1031,6 @@ class TokenManager:
                     if rem is not None and rem < 1.0 and pct >= 100.0:
                         pct = 99.99
                     is_disabled = bool(b.get("disabled", False))
-                    bucket_id = str(b.get("bucketId") or "").lower()
 
                     existing_bucket = parsed_quota[target_key][w]
                     should_update = (
@@ -1010,6 +1047,9 @@ class TokenManager:
                             "reset_time": b.get("resetTime") or existing_bucket.get("reset_time"),
                             "desc": b.get("description", "") or bucket_id,
                         }
+
+            if not gemini_in_summary:
+                self._apply_catalog_gemini_quota(parsed_quota, token)
 
             acc["quota"] = parsed_quota
             return parsed_quota

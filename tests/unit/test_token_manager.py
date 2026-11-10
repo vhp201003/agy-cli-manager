@@ -84,6 +84,64 @@ def test_fetch_account_quota_recursion_guard(tmp_path: Path):
         assert res == {"dummy": 1}
 
 
+def test_fetch_account_quota_uses_bucket_id_for_gemini_family(tmp_path: Path):
+    tm = TokenManager(manager_root=tmp_path)
+    tm._accounts["acc"] = {
+        "name": "acc",
+        "access_token": "valid-token",
+        "expires_at": 9999999999,
+    }
+    payload = {"groups": [{
+        "displayName": "Google models",
+        "buckets": [{
+            "bucketId": "gemini-5h",
+            "window": "5h",
+            "remainingFraction": 0.42,
+            "resetTime": "2026-11-10T12:00:00Z",
+        }],
+    }]}
+
+    def fake_open(req, timeout=8):
+        resp = MagicMock()
+        resp.__enter__.return_value = resp
+        resp.read.return_value = json.dumps(payload).encode("utf-8")
+        return resp
+
+    with patch("urllib.request.OpenerDirector.open", side_effect=fake_open):
+        quota = tm.fetch_account_quota("acc")
+
+    assert quota["gemini"]["5h"]["percent"] == 42.0
+    assert quota["third_party"]["5h"]["percent"] == 100.0
+
+
+def test_fetch_account_quota_falls_back_to_catalog_when_summary_omits_gemini(tmp_path: Path):
+    tm = TokenManager(manager_root=tmp_path)
+    tm._accounts["acc"] = {"name": "acc", "access_token": "valid-token", "expires_at": 9999999999}
+    summary = {"groups": [{
+        "displayName": "Claude and GPT models",
+        "buckets": [{"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.5, "resetTime": "2026-11-10T08:00:00Z"}],
+    }]}
+    catalog = {
+        "gemini-3-flash": {"quotaInfo": {"remainingFraction": 0.9, "resetTime": "2026-11-10T09:00:00Z"}},
+        "gemini-2.5-pro": {"quotaInfo": {"remainingFraction": 0.6, "resetTime": "2026-11-10T09:30:00Z"}},
+        "claude-sonnet-5-5-low": {"quotaInfo": {"remainingFraction": 0.1, "resetTime": "2026-11-10T08:00:00Z"}},
+    }
+
+    def fake_open(req, timeout=8):
+        resp = MagicMock()
+        resp.__enter__.return_value = resp
+        resp.read.return_value = json.dumps(summary).encode("utf-8")
+        return resp
+
+    with patch("urllib.request.OpenerDirector.open", side_effect=fake_open), \
+         patch.object(TokenManager, "_fetch_available_models", return_value=catalog):
+        quota = tm.fetch_account_quota("acc")
+
+    assert quota["gemini"]["5h"]["percent"] == 60.0
+    assert quota["gemini"]["5h"]["reset_time"] == "2026-11-10T09:30:00Z"
+    assert quota["third_party"]["5h"]["percent"] == 50.0
+
+
 def test_resolve_ca_bundle_precedence(tmp_path: Path):
     paths = build_paths(tmp_path)
     custom_bundle = tmp_path / "custom_bundle.crt"
