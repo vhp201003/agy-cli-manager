@@ -129,6 +129,9 @@ class TokenManager:
         self._cooldowns: dict[str, float] = {}
         self._quarantines: dict[str, dict] = {}
         self._model_pools: dict[str, list[str]] = {}
+        self._model_catalog: dict[str, dict] = {}
+        self._catalog_ts: float = 0.0
+        self._catalog_ttl: float = 600.0
         self._current_active_account: str | None = None
         self.reload_accounts()
         self.reload_model_pools()
@@ -607,6 +610,51 @@ class TokenManager:
                 return (1, ttl)
             else:
                 return (3, None)
+
+    def get_model_catalog(self, force: bool = False) -> dict[str, dict]:
+        """Return the union of upstream-advertised models across loaded accounts.
+
+        The upstream catalog is per-account and changes without notice (an id can
+        disappear between two days), so it is fetched rather than hardcoded.
+        """
+        with self._lock:
+            fresh = time.time() - self._catalog_ts < self._catalog_ttl
+            if self._model_catalog and fresh and not force:
+                return dict(self._model_catalog)
+
+            merged: dict[str, dict] = {}
+            for name in list(self._accounts):
+                token = self._accounts[name].get("access_token")
+                if not token:
+                    continue
+                for mid, info in self._fetch_available_models(token).items():
+                    merged.setdefault(mid, info)
+            if merged:
+                self._model_catalog = merged
+                self._catalog_ts = time.time()
+            return dict(self._model_catalog)
+
+    @staticmethod
+    def _fetch_available_models(token: str) -> dict[str, dict]:
+        req = urllib.request.Request(
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+            data=b"{}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "antigravity",
+            },
+            method="POST",
+        )
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=15) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logger.debug("fetchAvailableModels failed: %s", exc)
+            return {}
+        models = payload.get("models")
+        return models if isinstance(models, dict) else {}
 
     def get_token_by_session(self, session_key: str | None = None, model_name: str | None = None) -> tuple[str, str]:
         with self._lock:

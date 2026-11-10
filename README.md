@@ -193,13 +193,17 @@ curl http://127.0.0.1:8800/v1/chat/completions \
 Set your environment or agent custom model provider:
 - **Base URL:** `http://127.0.0.1:8800/v1` (or your VPS IP `http://<vps-ip>:8800/v1`)
 - **API Key:** `none` (any string)
-- **Models (verified against the live upstream):** `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`, `claude-sonnet-4-6`
+- **Models:** whatever the connected accounts are currently entitled to — query
+  `GET /v1/models`. The list is fetched from the upstream
+  `v1internal:fetchAvailableModels` RPC and cached for 10 minutes, because
+  Google adds and retires model ids without notice (for example the effort-suffixed
+  `gemini-3.8-flash-high` ids were replaced by a single `gemini-3.8-flash-tiered`).
 
-The gateway advertises exactly these identifiers through `GET /v1/models`. A
-requested model outside this set returns HTTP 400 (`unsupported_model`) and is
-never silently swapped for another model. Select reasoning effort with the
-standard `reasoning_effort` field (or a trailing `-low|-medium|-high|max`
-suffix), not by inventing a model name.
+A model that no connected account advertises returns HTTP 400 (`unsupported_model`)
+and is never silently swapped for another model: an unavailable model must fail
+loudly, not quietly change identity mid-conversation. Select reasoning effort with
+the standard `reasoning_effort` field; a trailing `-low|-medium|-high|max` suffix is
+also accepted and folds onto the advertised id rather than inventing a new one.
 
 ---
 

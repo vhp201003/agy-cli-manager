@@ -730,47 +730,74 @@ async def stream_logs(request: Request):
 
 _EFFORT_SUFFIX_RE = re.compile(r"-(low|medium|high|max)$", re.IGNORECASE)
 
-# Only identifiers verified against the live upstream (daily-cloudcode-pa) 2026-11-10.
-# Any other name is 404 NOT_FOUND upstream, so it is not advertised and not accepted.
-_SUPPORTED_MODEL_OWNERS = {
+# Fallback only: used when the upstream catalog cannot be fetched (offline,
+# expired token). The live catalog from v1internal:fetchAvailableModels is
+# authoritative because upstream adds and retires model ids without notice.
+_FALLBACK_MODEL_OWNERS = {
     "gemini-2.5-flash": "google",
     "gemini-2.5-flash-lite": "google",
-    "gemini-2.5-pro": "google",
-    "claude-sonnet-4-6": "anthropic",
 }
-_REAL_MODELS = tuple(_SUPPORTED_MODEL_OWNERS)
-_SUPPORTED_MODELS = [
-    {"id": mid, "object": "model", "created": 1700000000, "owned_by": owner}
-    for mid, owner in _SUPPORTED_MODEL_OWNERS.items()
-]
 
 
 class UnsupportedModelError(ValueError):
-    """Raised when a requested model is not a verified upstream identifier."""
+    """Raised when a requested model is not advertised by the upstream account."""
+
+
+def _live_model_ids() -> set[str]:
+    try:
+        return set(tm_instance.get_model_catalog())
+    except Exception:
+        return set()
+
+
+def _model_owners() -> dict[str, str]:
+    catalog = tm_instance.get_model_catalog() if tm_instance else {}
+    if not catalog:
+        return dict(_FALLBACK_MODEL_OWNERS)
+    owners: dict[str, str] = {}
+    for mid, info in catalog.items():
+        provider = str((info or {}).get("apiProvider", ""))
+        if "ANTHROPIC" in provider:
+            owners[mid] = "anthropic"
+        elif "OPENAI" in provider:
+            owners[mid] = "openai"
+        else:
+            owners[mid] = "google"
+    return owners
+
+
+def _model_entries(owners: dict[str, str]) -> list[dict]:
+    return [{"id": mid, "object": "model", "created": 1700000000, "owned_by": owner}
+            for mid, owner in sorted(owners.items())]
 
 
 def resolve_model_name(requested: str | None) -> str:
-    """Return the canonical upstream id, or raise for anything unverified.
+    """Return the canonical upstream id, or raise for anything not advertised.
 
     Only a trailing effort suffix and the legacy ``-latest`` marker are
-    canonicalized; neither ever makes an unknown model valid. No silent
-    fallback: an unsupported name is rejected, never swapped for Flash.
+    canonicalized; neither ever makes an unadvertised model valid. No silent
+    fallback: an unsupported name is rejected, never swapped for another model.
     """
     target = (requested or "").replace("-latest", "").strip()
-    target = _EFFORT_SUFFIX_RE.sub("", target)
-    if target in _REAL_MODELS:
-        return target
+    candidates = [target]
+    stripped = _EFFORT_SUFFIX_RE.sub("", target)
+    if stripped != target:
+        candidates.append(stripped)
+    known = _live_model_ids() or set(_FALLBACK_MODEL_OWNERS)
+    for cand in candidates:
+        if cand in known:
+            return cand
     raise UnsupportedModelError(requested)
 
 
 @app.get("/v1/models")
 async def list_models():
-    return {"object": "list", "data": _SUPPORTED_MODELS}
+    return {"object": "list", "data": _model_entries(_model_owners())}
 
 
 @app.get("/v1/models/{model_id}")
 async def get_model(model_id: str):
-    for m in _SUPPORTED_MODELS:
+    for m in _model_entries(_model_owners()):
         if m["id"] == model_id:
             return m
     return JSONResponse(

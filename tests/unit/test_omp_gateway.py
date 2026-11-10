@@ -6,7 +6,27 @@ from agy_cli_manager.proxy.translators.openai import (
     convert_gemini_response_to_openai,
 )
 from agy_cli_manager.proxy.translators.streaming import stream_gemini_to_openai
-from agy_cli_manager.proxy.fastapi_app import _SUPPORTED_MODELS, resolve_model_name, UnsupportedModelError
+from importlib import import_module
+
+fastapi_app = import_module("agy_cli_manager.proxy.fastapi_app")
+from agy_cli_manager.proxy.fastapi_app import resolve_model_name, UnsupportedModelError  # noqa: E402
+
+
+CATALOG = {
+    "gemini-2.5-flash": {"apiProvider": "API_PROVIDER_GOOGLE_GEMINI", "maxTokens": 1048576},
+    "gemini-2.5-flash-lite": {"apiProvider": "API_PROVIDER_GOOGLE_GEMINI"},
+    "gemini-2.5-pro": {"apiProvider": "API_PROVIDER_GOOGLE_GEMINI"},
+    "gemini-3.8-flash-tiered": {"apiProvider": "API_PROVIDER_GOOGLE_GEMINI", "maxTokens": 1048576},
+    "claude-sonnet-4-6": {"apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX"},
+    "claude-opus-4-6-thinking": {"apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX"},
+    "gpt-oss-120b-medium": {"apiProvider": "API_PROVIDER_OPENAI_VERTEX"},
+}
+
+
+@pytest.fixture
+def live_catalog(monkeypatch):
+    monkeypatch.setattr(fastapi_app.tm_instance, "get_model_catalog", lambda force=False: dict(CATALOG))
+    return CATALOG
 
 
 @pytest.fixture
@@ -14,53 +34,39 @@ def anyio_backend():
     return "asyncio"
 
 
-def test_v1_models_catalog():
-    # Catalog must list exactly the identifiers verified against the live upstream.
-    model_ids = {m["id"] for m in _SUPPORTED_MODELS}
-    assert model_ids == {
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-pro",
-        "claude-sonnet-4-6",
-    }
-
-
-def test_v1_models_retrieve():
+def test_v1_models_catalog(live_catalog):
+    # Advertised ids come from the upstream per-account catalog, not a hardcoded list.
     from starlette.testclient import TestClient
-    from agy_cli_manager.proxy.fastapi_app import app
 
-    client = TestClient(app)
-    resp = client.get("/v1/models/claude-sonnet-4-6")
-    assert resp.status_code == 200
-    assert resp.json()["id"] == "claude-sonnet-4-6"
-
-    resp_404 = client.get("/v1/models/non-existent-model")
-    assert resp_404.status_code == 404
+    data = TestClient(fastapi_app.app).get("/v1/models").json()["data"]
+    assert {m["id"] for m in data} == set(CATALOG)
+    owners = {m["id"]: m["owned_by"] for m in data}
+    assert owners["claude-sonnet-4-6"] == "anthropic"
+    assert owners["gpt-oss-120b-medium"] == "openai"
+    assert owners["gemini-3.8-flash-tiered"] == "google"
 
 
-def test_resolve_canonicalizes_supported_only():
-    # Real ids resolve to themselves (effort suffix and -latest are canonicalized).
+def test_v1_models_falls_back_when_catalog_unavailable(monkeypatch):
+    from starlette.testclient import TestClient
+
+    monkeypatch.setattr(fastapi_app.tm_instance, "get_model_catalog", lambda force=False: {})
+    ids = {m["id"] for m in TestClient(fastapi_app.app).get("/v1/models").json()["data"]}
+    assert ids == {"gemini-2.5-flash", "gemini-2.5-flash-lite"}
+
+
+def test_resolve_accepts_catalog_ids(live_catalog):
     assert resolve_model_name("gemini-2.5-flash") == "gemini-2.5-flash"
-    assert resolve_model_name("gemini-2.5-flash-lite") == "gemini-2.5-flash-lite"
     assert resolve_model_name("gemini-2.5-pro") == "gemini-2.5-pro"
     assert resolve_model_name("claude-sonnet-4-6") == "claude-sonnet-4-6"
-    assert resolve_model_name("gemini-2.5-flash-high") == "gemini-2.5-flash"
+    # Effort suffixes map onto the advertised id rather than fabricating a new one.
+    assert resolve_model_name("gemini-3.8-flash-tiered-high") == "gemini-3.8-flash-tiered"
     assert resolve_model_name("gemini-2.5-flash-latest") == "gemini-2.5-flash"
 
 
-def test_resolve_rejects_unsupported_without_fallback():
-    # Fictional and unknown names must raise; never silently swap to Flash.
-    for bad in (
-        "gemini-3.8-flash",
-        "gemini-4-argon",
-        "claude-opus-4-6",
-        "claude-sonnet-5-5",
-        "claude-opus-5-5",
-        "gpt-oss-120b",
-        "unknown-agent-model",
-        None,
-        "",
-    ):
+def test_resolve_rejects_ids_outside_catalog(live_catalog):
+    # Names that are not advertised upstream are rejected; never swapped for another model.
+    for bad in ("gemini-4-argon", "gemini-4-argon-low", "gemini-3.8-flash",
+                "claude-opus-4-6", "claude-sonnet-5-5", "unknown-agent-model", None, ""):
         try:
             resolve_model_name(bad)
         except UnsupportedModelError:
@@ -251,7 +257,7 @@ def test_thought_signature_capture_and_injection():
     assert parts[1]["thoughtSignature"] == "skip_thought_signature_validator"
 
 
-def test_unsupported_model_returns_400_without_token_call():
+def test_unsupported_model_returns_400_without_token_call(live_catalog):
     from starlette.testclient import TestClient
     from unittest.mock import patch
     from agy_cli_manager.proxy.fastapi_app import app
