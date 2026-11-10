@@ -170,6 +170,7 @@ class TokenManager:
         self._quarantines: dict[str, dict] = {}
         self._model_pools: dict[str, list[str]] = {}
         self._model_catalog: dict[str, dict] = {}
+        self._per_account_catalog: dict[str, set[str]] = {}
         self._catalog_ts: float = 0.0
         self._catalog_ttl: float = 600.0
         self._current_active_account: str | None = None
@@ -713,16 +714,41 @@ class TokenManager:
                 return dict(self._model_catalog)
 
             merged: dict[str, dict] = {}
+            per_account: dict[str, set[str]] = {}
             for name in list(self._accounts):
                 token = self._accounts[name].get("access_token")
                 if not token:
                     continue
-                for mid, info in self._fetch_available_models(token).items():
+                advertised = self._fetch_available_models(token)
+                if advertised:
+                    per_account[name] = set(advertised)
+                for mid, info in advertised.items():
                     merged.setdefault(mid, info)
             if merged:
                 self._model_catalog = merged
+                self._per_account_catalog = per_account
                 self._catalog_ts = time.time()
             return dict(self._model_catalog)
+
+    def _accounts_advertising(self, model_name: str | None, pool: list[str]) -> list[str]:
+        """Subset of `pool` whose catalog lists the requested model id."""
+        if not model_name:
+            return []
+        self.get_model_catalog()
+        if not self._per_account_catalog:
+            return []
+        candidates = {str(model_name).strip().lower()}
+        for part in str(model_name).split("|"):
+            if part.strip():
+                candidates.add(part.strip().lower())
+        candidates |= {_strip_effort_suffix(c) for c in list(candidates)}
+
+        capable = [
+            name
+            for name in pool
+            if candidates & {mid.lower() for mid in self._per_account_catalog.get(name, ())}
+        ]
+        return capable
 
     @staticmethod
     def _fetch_available_models(token: str) -> dict[str, dict]:
@@ -802,6 +828,14 @@ class TokenManager:
             model_str = (model_name or "").lower()
             is_claude_or_gpt = any(k in model_str for k in ("claude", "sonnet", "opus", "gpt", "o1", "o3"))
             target_family = "third_party" if is_claude_or_gpt else "gemini"
+
+            # An account that does not advertise the model cannot serve it: upstream
+            # answers 404 even when the account is healthy. When at least one candidate
+            # advertises it, drop the rest; when none do we keep the pool as-is so a
+            # declared-but-unlisted id still reaches upstream and fails honestly.
+            capable = self._accounts_advertising(model_name, cooldown_ok)
+            if capable:
+                cooldown_ok = capable
 
             # 3. Filter out quota-exhausted accounts
             alive_pool = []

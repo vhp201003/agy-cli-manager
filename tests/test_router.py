@@ -222,3 +222,26 @@ def test_model_pools_api_endpoints(monkeypatch, tmp_path):
     assert r4.status_code == 429
     assert r4.json()["error"]["type"] == "rate_limit_error"
 
+
+
+def test_routing_prefers_accounts_that_advertise_the_model(tmp_path):
+    """A healthy account without the model 404s, so capability decides first."""
+    tm = TokenManager(manager_root=tmp_path)
+    now = time.time()
+    tm._accounts = {
+        name: {"name": name, "access_token": f"tok{name[-1]}", "expires_at": now + 3600}
+        for name in ("acc1", "acc2")
+    }
+    tm.set_model_pools({})
+    tm._per_account_catalog = {
+        "acc1": {"gemini-3.8-flash-tiered", "gemini-2.5-flash"},
+        "acc2": {"claude-sonnet-5-5-high", "gemini-2.5-flash"},
+    }
+    tm._catalog_ts = time.time()
+
+    acc, _ = tm.get_token_by_session(model_name="claude-sonnet-5-5-high")
+    assert acc == "acc2"
+
+    # Unknown to every account: keep the normal pool instead of failing here.
+    acc_any, _ = tm.get_token_by_session(model_name="gemini-4-argon")
+    assert acc_any in ("acc1", "acc2")
