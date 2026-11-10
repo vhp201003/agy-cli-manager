@@ -22,6 +22,18 @@ logger = logging.getLogger("AgyProxy.TokenManager")
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
+_EFFORT_SUFFIXES = ("-extra-low", "-xhigh", "-minimal", "-medium", "-high", "-low", "-max", "-none")
+
+
+def _strip_effort_suffix(model: str) -> str:
+    """Drop a trailing thinking-level suffix so ids compare by model identity."""
+    name = model.strip().lower()
+    for suffix in _EFFORT_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 class ModelPoolExhaustedError(RuntimeError):
     def __init__(self, model_name: str, pool: list[str], message: str | None = None) -> None:
         self.model_name = model_name
@@ -241,6 +253,13 @@ class TokenManager:
                                 p = part.strip()
                                 if p and p not in candidates:
                                     candidates.append(p)
+                    # A thinking level is a request parameter, not part of the model
+                    # identity: `gemini-4-argon-high` must still match a pool rule
+                    # declared as `gemini-4-argon`.
+                    for cand in list(candidates):
+                        base = _strip_effort_suffix(cand)
+                        if base != cand and base not in candidates:
+                            candidates.append(base)
 
             # 1. Exact match (case-insensitive)
             for m_norm in candidates:
@@ -348,6 +367,22 @@ class TokenManager:
                             except Exception:
                                 pass
 
+                        recorded_email = (
+                            (accounts_state.get(name) or {}).get("identity") or {}
+                        ).get("email")
+                        if (
+                            recorded_email
+                            and email
+                            and recorded_email.lower() != email.lower()
+                        ):
+                            logger.warning(
+                                "Account slot '%s' holds credential for %s but state records %s; "
+                                "requests routed here use the stored account",
+                                name,
+                                email,
+                                recorded_email,
+                            )
+
                         self._accounts[name] = {
                             "name": name,
                             "access_token": access_token,
@@ -356,6 +391,7 @@ class TokenManager:
                             "expires_at": expires_at,
                             "email": email or name,
                             "display_name": display_name or name,
+                            "recorded_email": recorded_email,
                             "last_refreshed": existing.get("last_refreshed", 0),
                         }
 

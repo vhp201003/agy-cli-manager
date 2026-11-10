@@ -503,13 +503,25 @@ async def quarantine_account(name: str, request: Request):
 
 
 def _redacted_account(meta: dict, live_status: dict | None = None) -> dict:
-    """Account summary without any credential material."""
+    """Account summary without any credential material.
+
+    The live email comes from the credential actually stored for the slot, so it
+    is authoritative; the recorded identity is what the operator believes is
+    there. Showing the recorded value while the slot holds someone else's token
+    hides exactly the failure being debugged, so live wins and a mismatch is
+    reported explicitly.
+    """
     identity = meta.get("identity") if isinstance(meta.get("identity"), dict) else {}
     live = live_status or {}
+    identity_email = identity.get("email")
+    live_email = live.get("email")
+    mismatch = bool(identity_email and live_email and identity_email.lower() != live_email.lower())
     return {
         "enabled": bool(meta.get("enabled", True)),
-        "email": identity.get("email") or live.get("email"),
-        "display_name": identity.get("display_name") or live.get("display_name"),
+        "email": live_email or identity_email,
+        "identity_email": identity_email,
+        "identity_mismatch": mismatch,
+        "display_name": live.get("display_name") or identity.get("display_name"),
         "health_status": meta.get("health_status", "unknown"),
         "status": meta.get("status", "standby"),
         "quota": live.get("quota") or {},
