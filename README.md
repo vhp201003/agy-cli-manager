@@ -125,6 +125,53 @@ agy-client disconnect
 
 ---
 
+## Push a Local Account to a Remote Gateway
+
+`agy-client push` packages the Antigravity CLI credentials stored in your local
+`~/.gemini` profile and registers them on the gateway over the authenticated
+Admin API. The account is written to the server's credential store, added to
+`state.json`, and hot-loaded into the live rotation pool — no server restart.
+
+```bash
+# Push the default ~/.gemini profile, deriving the account name from the email
+agy-client push
+
+# Push a specific profile under an explicit name
+agy-client push work-account --source-dir ~/projects/.gemini
+
+# Replace an existing account and make it the active one
+agy-client push work-account --overwrite --set-active
+```
+
+Remote account administration on the gateway:
+
+```bash
+agy-client account list                # NAME | EMAIL | HEALTH | STATUS | 5H QUOTA | WEEKLY QUOTA
+agy-client account disable work-account
+agy-client account enable work-account
+agy-client account delete work-account # asks for confirmation unless --yes
+```
+
+`agy-client push` sends the full OAuth token bundle, so it warns when the
+gateway URL is plain HTTP on a non-localhost host. Use TLS for any gateway that
+is reachable outside a trusted network.
+
+### Admin API Key
+
+Every administrative gateway route (`/api/admin/*`, token refresh, warmup,
+quarantine, model-pool rules) requires the server's admin key.
+
+- The server generates a 64-character key on first start and stores it in
+  `~/.agy-cli-manager/server.json` (`0o600` on POSIX). `AGY_ADMIN_KEY` overrides it.
+- Print or rotate the key with `agy-server admin-key [--rotate]`.
+- The client keeps the key in `~/.agy-cli-manager/config.json` (`0o600` on POSIX);
+  set it with `agy-client connect <url> --admin-key <key>` or the `AGY_ADMIN_KEY` env var.
+- Requests send it as `X-Admin-Key` or `Authorization: Bearer <key>`.
+- The web dashboard asks for the key once per browser tab and keeps it in the
+  tab session.
+
+---
+
 ## Connect AI Coding Agents (Cursor, Cline, OpenCode)
 
 `agy-server` exposes a standard OpenAI-compatible `/v1/chat/completions` endpoint that routes requests across your account pool.
@@ -168,9 +215,12 @@ Visit `http://localhost:8800` (or `http://<vps-ip>:8800`) to access the Vercel G
 | Command | Role | Description |
 | :--- | :--- | :--- |
 | `agy-server` | Server Daemon | Start forward proxy (`:8899`) and Web Dashboard / OpenAI gateway (`:8800`) |
-| `agy-client connect <url>` | Workstation Client | Connect to gateway, download Root CA, and configure local proxy bundle |
+| `agy-server admin-key [--rotate]` | Server Daemon | Print or rotate the Admin API key guarding administrative routes |
+| `agy-client connect <url> [--admin-key <key>]` | Workstation Client | Connect to gateway, download Root CA, and configure local proxy bundle |
 | `agy-client status` | Workstation Client | Inspect connection state, upstream server latency, and pool health |
 | `agy-client disconnect` | Workstation Client | Remove gateway connection and restore direct network settings |
+| `agy-client push [name]` | Workstation Client | Package local `~/.gemini` credentials and register them on the gateway |
+| `agy-client account list\|delete\|enable\|disable` | Workstation Client | Manage accounts on the remote gateway |
 | `agy-run [args...]` | CLI Runner | Launch Antigravity CLI with automatic proxy environment variables |
 
 ### Account & Pool Administration

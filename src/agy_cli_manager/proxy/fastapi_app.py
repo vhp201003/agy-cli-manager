@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import hmac
 import json
 import logging
+import os
 from pathlib import Path
 import sys
 import time
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, Request, Query
+from fastapi import Depends, FastAPI, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
@@ -25,7 +27,7 @@ import httpx
 
 try:
     from agy_cli_manager.proxy.scheduler import WarmupScheduler
-    from agy_cli_manager.proxy.token_manager import TokenManager
+    from agy_cli_manager.proxy.token_manager import TokenManager, ModelPoolExhaustedError
     from agy_cli_manager.proxy.db import get_telemetry_db
     from agy_cli_manager.proxy.proxy_server import (
         REQUEST_LOGS,
@@ -45,7 +47,7 @@ try:
 except ImportError:
     try:
         from .scheduler import WarmupScheduler
-        from .token_manager import TokenManager
+        from .token_manager import TokenManager, ModelPoolExhaustedError
         from .db import get_telemetry_db
         from .proxy_server import (
             REQUEST_LOGS,
@@ -67,7 +69,7 @@ except ImportError:
             from scheduler import WarmupScheduler
         except ImportError:
             WarmupScheduler = None
-        from token_manager import TokenManager
+        from token_manager import TokenManager, ModelPoolExhaustedError
         from db import get_telemetry_db
         from proxy_server import (
             REQUEST_LOGS,
@@ -85,11 +87,63 @@ except ImportError:
         )
         from translators.streaming import stream_gemini_to_openai
 
+try:
+    from agy_cli_manager.manager import (
+        build_paths,
+        delete_account,
+        import_account_payload,
+        load_server_admin_key,
+        load_state,
+        server_config_path,
+        set_account_proxy,
+        set_enabled,
+        sync_state_from_disk,
+        validate_account_name,
+    )
+except ImportError:
+    from ..manager import (
+        build_paths,
+        delete_account,
+        import_account_payload,
+        load_server_admin_key,
+        load_state,
+        server_config_path,
+        set_account_proxy,
+        set_enabled,
+        sync_state_from_disk,
+        validate_account_name,
+    )
+
 logger = logging.getLogger("AgyProxy.FastAPI")
 
 tm_instance = TokenManager()
 active_subscribers: list[asyncio.Queue] = []
 main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def manager_paths():
+    return build_paths(tm_instance.manager_root)
+
+
+def resolve_admin_key() -> str:
+    """Return the active admin key; env override wins and rotations apply immediately."""
+    env_key = os.environ.get("AGY_ADMIN_KEY", "").strip()
+    if env_key:
+        return env_key
+    return load_server_admin_key(manager_paths())
+
+
+def verify_admin_key(request: Request) -> bool:
+    """FastAPI dependency guarding every administrative route."""
+    expected = resolve_admin_key()
+    candidate = (request.headers.get("x-admin-key") or "").strip()
+    if not candidate:
+        authorization = (request.headers.get("authorization") or "").strip()
+        if authorization.lower().startswith("bearer "):
+            candidate = authorization[len("bearer "):].strip()
+    if not candidate or not hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Invalid or missing Admin API Key")
+    return True
 
 
 def warmup_event_broadcaster(event: dict) -> None:
@@ -133,6 +187,14 @@ async def lifespan(app: FastAPI):
     global main_loop
     main_loop = asyncio.get_running_loop()
     register_event_listener(proxy_event_listener)
+
+    # The admin key must exist before the first administrative request so the
+    # operator can read it from the server log.
+    key_path = server_config_path(manager_paths().root)
+    had_key = key_path.is_file()
+    resolve_admin_key()
+    if not had_key and not os.environ.get("AGY_ADMIN_KEY", "").strip():
+        logger.warning("[Security] Generated new server admin key: %s", resolve_admin_key())
 
     # Initial check & quota sync on startup
     tm_instance.refresh_all_accounts(force=False)
@@ -233,6 +295,7 @@ async def get_status():
         "available_accounts": active_accs,
         "proxy_port": 8899,
         "accounts": status,
+        "model_pools": tm_instance.get_model_pools(),
         "total_requests_intercepted": stats["total_requests"],
         "failover_count": stats["failover_count"],
         "success_rate": stats["success_rate"],
@@ -243,6 +306,54 @@ async def get_status():
         },
         "avg_latency_ms": stats["avg_latency_ms"],
         "timestamp": time.time(),
+    }
+
+
+@app.get("/api/model-pools")
+async def get_model_pools():
+    return {
+        "model_pools": tm_instance.get_model_pools(),
+        "available_accounts": tm_instance.get_account_names(),
+    }
+
+
+@app.post("/api/model-pools", dependencies=[Depends(verify_admin_key)])
+async def update_model_pools(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Payload must be a JSON object"}, status_code=400)
+
+    # Support either {"model_pools": {...}} or direct {"pattern": [...]} or single rule {"pattern": "...", "accounts": [...]}
+    if "pattern" in body and "accounts" in body and not isinstance(body.get("pattern"), list):
+        pattern = str(body.get("pattern") or "").strip()
+        if not pattern:
+            return JSONResponse({"error": "Pattern cannot be empty"}, status_code=400)
+        pools = tm_instance.set_model_pool_rule(pattern, body.get("accounts") or [])
+    elif "model_pools" in body and isinstance(body["model_pools"], dict):
+        pools = tm_instance.set_model_pools(body["model_pools"])
+    else:
+        pools = tm_instance.set_model_pools(body)
+
+    return {
+        "message": "Model pools updated successfully",
+        "model_pools": pools,
+        "available_accounts": tm_instance.get_account_names(),
+    }
+
+
+@app.delete("/api/model-pools", dependencies=[Depends(verify_admin_key)])
+async def delete_model_pool(pattern: str = Query(..., description="Model pattern to remove")):
+    pat = str(pattern or "").strip()
+    if not pat:
+        return JSONResponse({"error": "Pattern is required"}, status_code=400)
+    pools = tm_instance.delete_model_pool_rule(pat)
+    return {
+        "message": f"Deleted model pool rule '{pat}'",
+        "model_pools": pools,
     }
 
 
@@ -272,27 +383,27 @@ async def get_token_analytics(range_days: int = Query(default=7, ge=1, le=90)):
     return await asyncio.to_thread(telemetry_db.query_token_analytics, range_days=range_days)
 
 
-@app.post("/api/refresh-all")
+@app.post("/api/refresh-all", dependencies=[Depends(verify_admin_key)])
 async def refresh_all():
     res = tm_instance.refresh_all_accounts(force=True)
     tm_instance.fetch_all_quotas()
     return {"message": "Refreshed all accounts and quotas", "results": res, "status": tm_instance.get_status()}
 
 
-@app.post("/api/sync-quotas")
+@app.post("/api/sync-quotas", dependencies=[Depends(verify_admin_key)])
 async def sync_quotas():
     res = tm_instance.fetch_all_quotas()
     return {"message": "Synced quotas for all accounts", "quotas": res, "status": tm_instance.get_status()}
 
 
-@app.post("/api/accounts/{name}/refresh")
+@app.post("/api/accounts/{name}/refresh", dependencies=[Depends(verify_admin_key)])
 async def refresh_account(name: str):
     ok, msg = tm_instance.refresh_account_token(name)
     tm_instance.fetch_account_quota(name)
     return {"success": ok, "message": msg, "account": tm_instance.get_status().get(name)}
 
 
-@app.post("/api/warmup-all")
+@app.post("/api/warmup-all", dependencies=[Depends(verify_admin_key)])
 async def warmup_all(model: str | None = None):
     res = tm_instance.warmup_all_accounts(model=model)
     return {"message": "Warmup completed for all accounts", "results": res, "status": tm_instance.get_status()}
@@ -305,7 +416,7 @@ async def get_warmup_schedule():
     return JSONResponse(warmup_scheduler.get_status())
 
 
-@app.post("/api/schedule/warmup")
+@app.post("/api/schedule/warmup", dependencies=[Depends(verify_admin_key)])
 async def update_warmup_schedule(request: Request):
     if warmup_scheduler is None:
         return JSONResponse({"error": "WarmupScheduler not initialized"}, status_code=503)
@@ -337,7 +448,7 @@ async def update_warmup_schedule(request: Request):
     return JSONResponse(status)
 
 
-@app.post("/api/schedule/warmup/trigger")
+@app.post("/api/schedule/warmup/trigger", dependencies=[Depends(verify_admin_key)])
 async def trigger_warmup_schedule():
     if warmup_scheduler is None:
         return JSONResponse({"error": "WarmupScheduler not initialized"}, status_code=503)
@@ -349,14 +460,14 @@ async def trigger_warmup_schedule():
     })
 
 
-@app.post("/api/accounts/{name}/warmup")
+@app.post("/api/accounts/{name}/warmup", dependencies=[Depends(verify_admin_key)])
 async def warmup_account(name: str, model: str | None = None):
     ok, msg = tm_instance.warmup_account(name, model=model)
     tm_instance.fetch_account_quota(name)
     return {"success": ok, "message": msg, "account": tm_instance.get_status().get(name)}
 
 
-@app.post("/api/accounts/{name}/clear-cooldown")
+@app.post("/api/accounts/{name}/clear-cooldown", dependencies=[Depends(verify_admin_key)])
 async def clear_cooldown(name: str):
     if name not in tm_instance.get_account_names():
         return JSONResponse({"error": "Account not found"}, status_code=404)
@@ -364,7 +475,7 @@ async def clear_cooldown(name: str):
     return {"message": f"Cleared cooldown for {name}", "status": tm_instance.get_status().get(name)}
 
 
-@app.post("/api/accounts/{name}/clear-quarantine")
+@app.post("/api/accounts/{name}/clear-quarantine", dependencies=[Depends(verify_admin_key)])
 async def clear_quarantine(name: str):
     if name not in tm_instance.get_account_names():
         return JSONResponse({"error": "Account not found"}, status_code=404)
@@ -372,7 +483,7 @@ async def clear_quarantine(name: str):
     return {"message": f"Cleared quarantine for {name}", "status": tm_instance.get_status().get(name)}
 
 
-@app.post("/api/accounts/{name}/quarantine")
+@app.post("/api/accounts/{name}/quarantine", dependencies=[Depends(verify_admin_key)])
 async def quarantine_account(name: str, request: Request):
     if name not in tm_instance.get_account_names():
         return JSONResponse({"error": "Account not found"}, status_code=404)
@@ -390,6 +501,208 @@ async def quarantine_account(name: str, request: Request):
     return {"message": f"Quarantined {name} for {duration}s", "status": tm_instance.get_status().get(name)}
 
 
+def _redacted_account(meta: dict, live_status: dict | None = None) -> dict:
+    """Account summary without any credential material."""
+    identity = meta.get("identity") if isinstance(meta.get("identity"), dict) else {}
+    live = live_status or {}
+    return {
+        "enabled": bool(meta.get("enabled", True)),
+        "email": identity.get("email") or live.get("email"),
+        "display_name": identity.get("display_name") or live.get("display_name"),
+        "health_status": meta.get("health_status", "unknown"),
+        "status": meta.get("status", "standby"),
+        "quota": live.get("quota") or {},
+        "created_at": meta.get("created_at"),
+    }
+
+
+def _broadcast_admin_event(method: str, path: str, account: str, status: int, status_text: str) -> None:
+    """Emit admin actions in the dashboard log event shape."""
+    broadcast_event(
+        {
+            "id": str(uuid.uuid4())[:8],
+            "time": time.strftime("%H:%M:%S"),
+            "method": method,
+            "path": path,
+            "host": "local",
+            "account": account,
+            "model": "admin",
+            "inbound_token": "None",
+            "overridden_token": "None",
+            "status": status,
+            "status_text": status_text,
+            "latency_ms": 0.0,
+            "body": "",
+            "response": status_text,
+        }
+    )
+
+
+@app.get("/api/admin/accounts", dependencies=[Depends(verify_admin_key)])
+async def admin_list_accounts():
+    paths = manager_paths()
+    state = sync_state_from_disk(paths, load_state(paths))
+    live_status = tm_instance.get_status()
+    accounts = {
+        name: _redacted_account(meta, live_status.get(name))
+        for name, meta in state.get("accounts", {}).items()
+    }
+    return {
+        "total": len(accounts),
+        "active": state.get("active"),
+        "accounts": accounts,
+    }
+
+
+@app.post("/api/admin/accounts/push", dependencies=[Depends(verify_admin_key)])
+async def admin_push_account(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Payload must be a JSON object"}, status_code=400)
+
+    payload = body.get("payload")
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "'payload' must be a JSON object"}, status_code=400)
+
+    try:
+        name = validate_account_name(str(body.get("name") or ""))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    token_data = payload.get("token_data") if isinstance(payload.get("token_data"), dict) else {}
+    if not str(token_data.get("access_token") or "").strip():
+        return JSONResponse(
+            {"error": "'payload.token_data.access_token' is required"}, status_code=400
+        )
+    if not str(token_data.get("refresh_token") or "").strip():
+        # Without a refresh token the imported account dies with the first
+        # access-token expiry and can never recover on its own.
+        return JSONResponse(
+            {"error": "'payload.token_data.refresh_token' is required"}, status_code=400
+        )
+
+    paths = manager_paths()
+    try:
+        meta = import_account_payload(
+            paths,
+            name,
+            payload,
+            overwrite=bool(body.get("overwrite", False)),
+            set_active=bool(body.get("set_active", False)),
+        )
+    except ValueError as exc:
+        status_code = 409 if "already exists" in str(exc) else 400
+        return JSONResponse({"error": str(exc)}, status_code=status_code)
+
+    if not tm_instance.hot_reload_account(name):
+        return JSONResponse(
+            {"error": f"Account '{name}' was stored but could not be loaded into the pool"},
+            status_code=500,
+        )
+    try:
+        asyncio.create_task(asyncio.to_thread(tm_instance.fetch_account_quota, name))
+    except RuntimeError:
+        pass
+    _broadcast_admin_event("POST", "/api/admin/accounts/push", name, 201, "201 Account imported")
+
+    return JSONResponse(
+        {
+            "message": f"Account '{name}' imported and ready",
+            "name": name,
+            "account": _redacted_account(meta, tm_instance.get_status().get(name)),
+            "pool_size": len(tm_instance.get_account_names()),
+        },
+        status_code=201,
+    )
+
+
+@app.patch("/api/admin/accounts/{name}", dependencies=[Depends(verify_admin_key)])
+async def admin_update_account(name: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Payload must be a JSON object"}, status_code=400)
+
+    try:
+        name = validate_account_name(name)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    paths = manager_paths()
+    state = sync_state_from_disk(paths, load_state(paths))
+    if name not in state.get("accounts", {}):
+        return JSONResponse({"error": f"Account not found: {name}"}, status_code=404)
+
+    if "enabled" in body:
+        try:
+            set_enabled(paths, name, bool(body.get("enabled")))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        # The pool only knows about state.json, so a disable has to be applied
+        # to the in-memory accounts or the account stays routable.
+        tm_instance.reload_accounts()
+
+    proxy_url = body.get("proxy_url")
+    label = body.get("label")
+    if proxy_url is not None or label is not None:
+        meta = state.get("accounts", {}).get(name, {})
+        existing_proxy = meta.get("proxy") if isinstance(meta.get("proxy"), dict) else {}
+        url = str(proxy_url or existing_proxy.get("url") or "").strip()
+        if not url:
+            return JSONResponse(
+                {"error": "'proxy_url' is required to set a proxy label"}, status_code=400
+            )
+        try:
+            set_account_proxy(
+                paths,
+                name,
+                url=url,
+                label=str(label) if label is not None else existing_proxy.get("label"),
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+    state = sync_state_from_disk(paths, load_state(paths))
+    meta = state.get("accounts", {}).get(name, {})
+    return {
+        "message": f"Account '{name}' updated",
+        "name": name,
+        "account": _redacted_account(meta, tm_instance.get_status().get(name)),
+    }
+
+
+@app.delete("/api/admin/accounts/{name}", dependencies=[Depends(verify_admin_key)])
+async def admin_delete_account(name: str):
+    try:
+        name = validate_account_name(name)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    paths = manager_paths()
+    state = sync_state_from_disk(paths, load_state(paths))
+    if name not in state.get("accounts", {}):
+        return JSONResponse({"error": f"Account not found: {name}"}, status_code=404)
+
+    try:
+        result = delete_account(paths, name)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+
+    tm_instance.remove_account(name)
+    tm_instance.set_current_active_account(result.get("promoted_to"))
+    _broadcast_admin_event("DELETE", f"/api/admin/accounts/{name}", name, 200, "200 Account deleted")
+
+    return {
+        "message": "Account deleted",
+        "name": name,
+        "active": result.get("active"),
+        "promoted_to": result.get("promoted_to"),
+    }
 
 
 @app.get("/api/stream")
@@ -536,10 +849,25 @@ async def chat_completions(request: Request):
     url = f"https://{_CLOUDCODE_HOST}{path}"
     cloudcode_payload = {"project": _CLOUDCODE_PROJECT, "model": upstream_model, "request": gemini_payload}
 
+    routing_model_key = f"{requested_model}|{upstream_model}" if requested_model != upstream_model else upstream_model
+
     if not is_stream:
         async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
             for attempt in range(max_attempts):
-                acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=upstream_model)
+                try:
+                    acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=routing_model_key)
+                except ModelPoolExhaustedError as pool_err:
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "message": str(pool_err),
+                                "type": "rate_limit_error",
+                                "param": None,
+                                "code": "429",
+                            }
+                        },
+                        status_code=429,
+                    )
                 headers = {
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
@@ -656,7 +984,21 @@ async def chat_completions(request: Request):
 
     for attempt in range(max_attempts):
         stream_client = httpx.AsyncClient(timeout=180.0, trust_env=False)
-        acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=upstream_model)
+        try:
+            acc_name, access_token = tm_instance.get_token_by_session(session_key, model_name=routing_model_key)
+        except ModelPoolExhaustedError as pool_err:
+            await stream_client.aclose()
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": str(pool_err),
+                        "type": "rate_limit_error",
+                        "param": None,
+                        "code": "429",
+                    }
+                },
+                status_code=429,
+            )
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
@@ -1334,6 +1676,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <span>Connect Client</span>
       </button>
 
+      <!-- Per-Model Pool Routing Config Button -->
+      <button onclick="openModelPoolsModal()" id="btnModelPools" title="Configure Strict Account Pools per Model">
+        <svg class="btn-svg" viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/></svg>
+        <span class="schedule-dot disabled" id="modelPoolsDot"></span>
+        <span id="modelPoolsPillText">Model Pools: Global</span>
+      </button>
+
       <!-- Auto-Warmup Schedule Action Button -->
       <button onclick="openScheduleModal()" id="schedulePill" title="Automated 5H Quota Warmup Scheduler">
         <svg class="btn-svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -1605,6 +1954,27 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     let currentFilter = 'all';
     let currentModalRawBody = "";
 
+    const ADMIN_KEY_STORAGE = 'agy_admin_key';
+
+    // Administrative routes require the server admin key. It is kept in the
+    // tab session (not on disk) and asked for once when a request is refused.
+    async function apiFetch(url, options = {}, retried = false) {
+      const opts = Object.assign({}, options);
+      const key = (sessionStorage.getItem(ADMIN_KEY_STORAGE) || '').trim();
+      if (key) {
+        opts.headers = Object.assign({}, opts.headers || {}, { 'X-Admin-Key': key });
+      }
+      const res = await fetch(url, opts);
+      if (res.status === 401 && !retried) {
+        const entered = window.prompt('Admin API key required for this action:');
+        if (entered && entered.trim()) {
+          sessionStorage.setItem(ADMIN_KEY_STORAGE, entered.trim());
+          return apiFetch(url, opts, true);
+        }
+      }
+      return res;
+    }
+
     // Anti-Spam Button Debounce Utility
     async function handleActionWithButton(btn, asyncFn) {
       if (!btn || btn.disabled) return;
@@ -1732,6 +2102,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
 
     let accountsCache = {};
+    let modelPoolsCache = {};
     let currentAccountFilter = 'all';
     let currentAccountView = localStorage.getItem('agy_account_view') || 'grid';
     let accountPage = 1;
@@ -1806,7 +2177,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     async function fetchTokenAnalytics() {
       try {
-        const res = await fetch(`/api/analytics/tokens?range_days=${currentTokenRangeDays}`);
+        const res = await apiFetch(`/api/analytics/tokens?range_days=${currentTokenRangeDays}`);
         if (!res.ok) return;
         const data = await res.json();
         renderTokenAnalytics(data);
@@ -1905,9 +2276,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     async function fetchStatus(btn = null) {
       const doFetch = async () => {
-        const res = await fetch('/api/status');
+        const res = await apiFetch('/api/status');
         const data = await res.json();
         accountsCache = data.accounts || {};
+        if (data.model_pools !== undefined) {
+          modelPoolsCache = data.model_pools || {};
+          renderModelPoolsPill(modelPoolsCache);
+        }
         renderAccounts(accountsCache);
         updateKPIs(data);
         await fetchTokenAnalytics();
@@ -2009,14 +2384,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const c5hEffectivePct = cWeeklyExhausted ? 0 : c5h.percent;
       const g5hEffectivePct = gWeeklyExhausted ? 0 : g5h.percent;
 
-      const emailDisplay = acc.email && acc.email.includes('@') ? acc.email : (acc.email || name);
-      const nameDisplay = acc.display_name && acc.display_name !== name ? acc.display_name : '';
+      const emailDisplay = escapeHtml(acc.email && acc.email.includes('@') ? acc.email : (acc.email || name));
+      const nameDisplay = escapeHtml(acc.display_name && acc.display_name !== name ? acc.display_name : '');
+
+      const assignedModels = [];
+      for (const [pat, accList] of Object.entries(modelPoolsCache || {})) {
+        if (Array.isArray(accList) && accList.includes(name)) {
+          assignedModels.push(pat);
+        }
+      }
 
       return {
         name,
         acc,
         emailDisplay,
         nameDisplay,
+        assignedModels,
         g5h, gWeekly, c5h, cWeekly,
         gWeeklyExhausted, cWeeklyExhausted,
         g5hExhausted, c5hExhausted,
@@ -2098,7 +2481,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
 
       for (const item of items) {
-        const { name, acc, emailDisplay, nameDisplay, badgeClass, badgeText, isGeminiHealthy, isClaudeHealthy, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct, g5hExhausted, c5hExhausted } = item;
+        const { name, acc, emailDisplay, nameDisplay, assignedModels, badgeClass, badgeText, isGeminiHealthy, isClaudeHealthy, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct, g5hExhausted, c5hExhausted } = item;
         const g5hColor = getBarColor(g5hEffectivePct, 'var(--accent)');
         const c5hColor = getBarColor(c5hEffectivePct, 'var(--purple)');
         const gWkColor = gWeeklyExhausted ? 'var(--red)' : (gWeekly.percent < 25 ? 'var(--yellow)' : '#10b981');
@@ -2112,6 +2495,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         const gWkValText = gWeeklyExhausted ? '≤5%' : Number(gWeekly.percent).toFixed(0) + '%';
         const c5hValText = cWeeklyExhausted ? '0%' : (c5h.percent <= 5.0 && c5h.reset_time ? '≤5%' : Number(c5hEffectivePct).toFixed(0) + '%');
         const cWkValText = cWeeklyExhausted ? '≤5%' : Number(cWeekly.percent).toFixed(0) + '%';
+        const modelTagsHtml = (assignedModels || []).map(p => `<span class="code-chip" style="color:var(--purple); border-color:rgba(192,132,252,0.3); font-size:0.66rem;" title="Strict Model Pool Rule: ${escapeHtml(p)}">Pool: ${escapeHtml(p)}</span>`).join('');
 
         const card = document.createElement('div');
         card.className = 'card';
@@ -2121,10 +2505,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <div class="acc-email" title="${emailDisplay}">
                 <span>${emailDisplay}</span>
               </div>
-              <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px; flex-wrap: wrap;">
-                <span class="code-chip" style="color:var(--accent);">Profile: ${name}</span>
+              <div style="display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap;">
+                <span class="code-chip" style="color:var(--accent);">Profile: ${escapeHtml(name)}</span>
                 ${nameDisplay ? `<span style="font-size: 0.74rem; color: var(--text-muted);">${nameDisplay}</span>` : ''}
                 ${acc.priority_tier === 1 ? `<span class="code-chip" style="color:#10b981; border-color:rgba(16,185,129,0.3);" title="Priority 1: Draining soonest expiring 5H quota">DRAIN: ${acc.time_until_5h_reset_formatted || 'Active'}</span>` : ''}
+                ${modelTagsHtml}
               </div>
             </div>
             <div class="badge ${badgeClass}">${badgeText}</div>
@@ -2195,15 +2580,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <span>Exp: <b>${acc.token_expires_in_min}m</b></span>
             <div style="display:flex; gap:6px;">
               ${acc.in_quarantine ? `
-                <button onclick="clearQuarantineSingle('${name}', this)" class="card-btn" style="border-color:var(--red); color:var(--red);" title="Release from Quarantine (${acc.quarantine_reason || ''})">
+                <button onclick="clearQuarantineSingle('${escapeHtml(name)}', this)" class="card-btn" style="border-color:var(--red); color:var(--red);" title="Release from Quarantine (${escapeHtml(acc.quarantine_reason || '')})">
                   <span>Un-quarantine</span>
                 </button>
               ` : ''}
-              <button onclick="warmupSingle('${name}', this)" class="card-btn" title="Activate 5H for ${name}">
+              <button onclick="warmupSingle('${escapeHtml(name)}', this)" class="card-btn" title="Activate 5H for ${escapeHtml(name)}">
                 <svg class="btn-svg" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
                 <span>Activate</span>
               </button>
-              <button onclick="refreshSingle('${name}', this)" class="card-btn" title="Refresh Token for ${name}">
+              <button onclick="refreshSingle('${escapeHtml(name)}', this)" class="card-btn" title="Refresh Token for ${escapeHtml(name)}">
                 <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 <span>Refresh</span>
               </button>
@@ -2224,7 +2609,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
 
       for (const item of items) {
-        const { name, acc, emailDisplay, nameDisplay, badgeClass, badgeText, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct } = item;
+        const { name, acc, emailDisplay, nameDisplay, assignedModels, badgeClass, badgeText, gWeekly, gWeeklyExhausted, g5h, g5hEffectivePct, cWeekly, cWeeklyExhausted, c5h, c5hEffectivePct } = item;
         const tr = document.createElement('tr');
         
         const g5hColor = getBarColor(g5hEffectivePct, 'var(--accent)');
@@ -2233,14 +2618,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         const gWkInfo = formatResetTime(gWeekly.reset_time);
         const c5hInfo = formatResetTime(c5h.reset_time);
         const cWkInfo = formatResetTime(cWeekly.reset_time);
+        const modelTagsHtml = (assignedModels || []).map(p => `<span class="code-chip" style="color:var(--purple); border-color:rgba(192,132,252,0.3); font-size:0.68rem;">Pool: ${escapeHtml(p)}</span>`).join('');
 
         tr.innerHTML = `
           <td>
             <div style="font-weight:600; color:#fff;">${emailDisplay}</div>
             <div style="display:flex; align-items:center; gap:6px; margin-top:3px; flex-wrap:wrap;">
-              <span class="code-chip" style="color:var(--accent); font-size:0.7rem;">${name}</span>
+              <span class="code-chip" style="color:var(--accent); font-size:0.7rem;">${escapeHtml(name)}</span>
               ${nameDisplay ? `<span style="font-size:0.72rem; color:var(--text-muted);">${nameDisplay}</span>` : ''}
               ${acc.priority_tier === 1 ? `<span class="code-chip" style="color:#10b981; border-color:rgba(16,185,129,0.3); font-size:0.7rem;" title="Priority 1: Draining soonest expiring 5H quota">DRAIN: ${acc.time_until_5h_reset_formatted || 'Active'}</span>` : ''}
+              ${modelTagsHtml}
             </div>
           </td>
           <td>
@@ -2274,11 +2661,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <div style="display:inline-flex; align-items:center; gap:10px;">
               <span class="sub-tag" style="margin:0;">Exp: <b>${acc.token_expires_in_min}m</b></span>
               ${acc.in_quarantine ? `
-                <button onclick="clearQuarantineSingle('${name}', this)" class="card-btn" style="border-color:var(--red); color:var(--red);" title="Release from Quarantine">
+                <button onclick="clearQuarantineSingle('${escapeHtml(name)}', this)" class="card-btn" style="border-color:var(--red); color:var(--red);" title="Release from Quarantine">
                   <span>Un-quarantine</span>
                 </button>
               ` : ''}
-              <button onclick="refreshSingle('${name}', this)" class="card-btn" title="Refresh Token">
+              <button onclick="refreshSingle('${escapeHtml(name)}', this)" class="card-btn" title="Refresh Token">
                 <svg class="btn-svg" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 <span>Refresh</span>
               </button>
@@ -2306,7 +2693,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function warmupAllAccounts(btn) {
       await handleActionWithButton(btn, async () => {
         try {
-          const res = await fetch('/api/warmup-all', { method: 'POST' });
+          const res = await apiFetch('/api/warmup-all', { method: 'POST' });
           const data = await res.json();
           const successes = Object.values(data.results || {}).filter(r => r.success).length;
           const total = Object.keys(data.results || {}).length;
@@ -2321,7 +2708,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function warmupSingle(name, btn) {
       await handleActionWithButton(btn, async () => {
         try {
-          const res = await fetch(`/api/accounts/${name}/warmup`, { method: 'POST' });
+          const res = await apiFetch(`/api/accounts/${name}/warmup`, { method: 'POST' });
           const data = await res.json();
           showToast(`${name}: ${data.message}`, data.success ? 'success' : 'error');
           await fetchStatus();
@@ -2334,7 +2721,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function refreshAllTokens(btn) {
       await handleActionWithButton(btn, async () => {
         try {
-          const res = await fetch('/api/refresh-all', { method: 'POST' });
+          const res = await apiFetch('/api/refresh-all', { method: 'POST' });
           const data = await res.json();
           showToast('Tokens refreshed successfully', 'success');
           await fetchStatus();
@@ -2347,7 +2734,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function syncAllQuotas(btn) {
       await handleActionWithButton(btn, async () => {
         try {
-          const res = await fetch('/api/sync-quotas', { method: 'POST' });
+          const res = await apiFetch('/api/sync-quotas', { method: 'POST' });
           const data = await res.json();
           showToast('Quotas updated successfully', 'success');
           await fetchStatus();
@@ -2360,7 +2747,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function refreshSingle(name, btn) {
       await handleActionWithButton(btn, async () => {
         try {
-          const res = await fetch(`/api/accounts/${name}/refresh`, { method: 'POST' });
+          const res = await apiFetch(`/api/accounts/${name}/refresh`, { method: 'POST' });
           const data = await res.json();
           showToast(`${name}: ${data.message || 'Refreshed'}`, data.success ? 'success' : 'error');
           await fetchStatus();
@@ -2373,7 +2760,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function clearQuarantineSingle(name, btn) {
       await handleActionWithButton(btn, async () => {
         try {
-          const res = await fetch(`/api/accounts/${name}/clear-quarantine`, { method: 'POST' });
+          const res = await apiFetch(`/api/accounts/${name}/clear-quarantine`, { method: 'POST' });
           const data = await res.json();
           showToast(`${name}: ${data.message || 'Released from quarantine'}`, 'success');
           await fetchStatus();
@@ -2387,7 +2774,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     async function pollLogs() {
       try {
-        const res = await fetch('/api/logs');
+        const res = await apiFetch('/api/logs');
         const logs = await res.json();
         if (logs.length > 0) {
           const emptyRow = document.getElementById('emptyRow');
@@ -2586,6 +2973,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         closeModal();
         closeScheduleModal();
         closeConnectModal();
+        closeModelPoolsModal();
       }
     });
 
@@ -2651,7 +3039,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     async function fetchWarmupSchedule() {
       try {
-        const res = await fetch('/api/schedule/warmup');
+        const res = await apiFetch('/api/schedule/warmup');
         if (!res.ok) return;
         const status = await res.json();
         warmupScheduleCache = status;
@@ -2739,7 +3127,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           const rawTimes = document.getElementById('scheduleTimesInput').value;
           const times = rawTimes.split(',').map(t => t.trim()).filter(Boolean);
 
-          const res = await fetch('/api/schedule/warmup', {
+          const res = await apiFetch('/api/schedule/warmup', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled, times })
@@ -2760,7 +3148,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       await handleActionWithButton(btn, async () => {
         try {
           showToast('Triggering warmup cycle...', 'info');
-          const res = await fetch('/api/schedule/warmup/trigger', { method: 'POST' });
+          const res = await apiFetch('/api/schedule/warmup/trigger', { method: 'POST' });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           showToast('Manual warmup cycle triggered', 'success');
@@ -2845,7 +3233,204 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         setTimeout(() => btn.innerText = orig, 1800);
       });
     }
+
+    function renderModelPoolsPill(pools) {
+      const dot = document.getElementById('modelPoolsDot');
+      const text = document.getElementById('modelPoolsPillText');
+      if (!dot || !text) return;
+      const count = Object.keys(pools || {}).length;
+      dot.className = 'schedule-dot ' + (count > 0 ? 'enabled' : 'disabled');
+      text.innerText = count > 0 ? `Model Pools: ${count} rule${count > 1 ? 's' : ''}` : 'Model Pools: Global';
+    }
+
+    let draftModelPools = [];
+
+    function openModelPoolsModal() {
+      const modal = document.getElementById('modelPoolsModal');
+      if (!modal) return;
+      draftModelPools = Object.entries(modelPoolsCache || {}).map(([pattern, accounts]) => ({
+        pattern,
+        accounts: Array.isArray(accounts) ? [...accounts] : []
+      }));
+      renderModelPoolsEditor();
+      modal.classList.add('active');
+    }
+
+    function closeModelPoolsModal() {
+      const modal = document.getElementById('modelPoolsModal');
+      if (modal) modal.classList.remove('active');
+    }
+
+    function addDraftModelPoolRule(presetPattern = '') {
+      const allAccs = Object.keys(accountsCache || {});
+      draftModelPools.push({
+        pattern: presetPattern || '',
+        accounts: allAccs.length > 0 ? [allAccs[0]] : []
+      });
+      renderModelPoolsEditor();
+    }
+
+    function removeDraftModelPoolRule(index) {
+      draftModelPools.splice(index, 1);
+      renderModelPoolsEditor();
+    }
+
+    function updateDraftPattern(index, value) {
+      if (draftModelPools[index]) {
+        draftModelPools[index].pattern = value;
+      }
+    }
+
+    function toggleDraftRuleAccount(ruleIndex, accName) {
+      const rule = draftModelPools[ruleIndex];
+      if (!rule) return;
+      const idx = rule.accounts.indexOf(accName);
+      if (idx >= 0) {
+        rule.accounts.splice(idx, 1);
+      } else {
+        rule.accounts.push(accName);
+      }
+      renderModelPoolsEditor();
+    }
+
+    function selectAllAccountsForRule(ruleIndex) {
+      const rule = draftModelPools[ruleIndex];
+      if (!rule) return;
+      rule.accounts = Object.keys(accountsCache || {});
+      renderModelPoolsEditor();
+    }
+
+    function renderModelPoolsEditor() {
+      const container = document.getElementById('modelPoolsRulesList');
+      if (!container) return;
+      container.innerHTML = '';
+      const allAccounts = Object.keys(accountsCache || {});
+
+      if (draftModelPools.length === 0) {
+        container.innerHTML = `
+          <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.78rem; border: 1px dashed var(--border); border-radius: 8px; background: #08080a;">
+            No custom model pool rules configured.<br>All models currently share the global account pool.
+          </div>
+        `;
+        return;
+      }
+
+      draftModelPools.forEach((rule, idx) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'background: #08080a; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;';
+
+        const accCheckboxes = allAccounts.map(accName => {
+          const isChecked = rule.accounts.includes(accName);
+          const accObj = accountsCache[accName] || {};
+          const labelEmail = accObj.email && accObj.email !== accName ? ` (${accObj.email})` : '';
+          return `
+            <button type="button" onclick="toggleDraftRuleAccount(${idx}, '${escapeHtml(accName)}')"
+              style="height: 26px; padding: 2px 9px; font-size: 0.72rem; font-family: var(--font-mono); border-radius: 5px; border: 1px solid ${isChecked ? 'var(--accent)' : 'var(--border)'}; background: ${isChecked ? 'rgba(56,189,248,0.14)' : '#121216'}; color: ${isChecked ? '#fff' : 'var(--text-muted)'}; cursor: pointer;"
+              title="${escapeHtml(accName + labelEmail)}">
+              <span>${isChecked ? '✓ ' : ''}${escapeHtml(accName)}</span>
+            </button>
+          `;
+        }).join('');
+
+        row.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+            <div style="flex: 1; display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 0.72rem; font-family: var(--font-mono); color: var(--text-muted); text-transform: uppercase; width: 62px; flex-shrink: 0;">Model:</span>
+              <input type="text" value="${escapeHtml(rule.pattern)}" oninput="updateDraftPattern(${idx}, this.value)"
+                placeholder="e.g. claude-sonnet-4-6, gemini-2.5-pro, claude*, *"
+                style="flex: 1; background: #111115; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 0.8rem; font-family: var(--font-mono); color: #fff; outline: none;">
+            </div>
+            <button type="button" onclick="selectAllAccountsForRule(${idx})" class="card-btn" title="Assign all accounts to this rule">All Accs</button>
+            <button type="button" onclick="removeDraftModelPoolRule(${idx})" class="card-btn" style="color: var(--red); border-color: rgba(239,68,68,0.3);" title="Remove rule">Delete</button>
+          </div>
+          <div style="display: flex; align-items: flex-start; gap: 8px;">
+            <span style="font-size: 0.72rem; font-family: var(--font-mono); color: var(--text-muted); text-transform: uppercase; width: 62px; flex-shrink: 0; padding-top: 4px;">Accounts:</span>
+            <div style="display: flex; flex-wrap: wrap; gap: 6px; flex: 1;">
+              ${accCheckboxes || '<span style="color:var(--text-muted); font-size:0.75rem;">No accounts in pool</span>'}
+            </div>
+          </div>
+        `;
+        container.appendChild(row);
+      });
+    }
+
+    async function saveModelPoolsConfig(btn) {
+      await handleActionWithButton(btn, async () => {
+        try {
+          const payload = {};
+          for (const rule of draftModelPools) {
+            const pat = (rule.pattern || '').trim();
+            if (!pat) continue;
+            if (!rule.accounts || rule.accounts.length === 0) {
+              showToast(`Rule "${pat}" must select at least 1 account`, 'error');
+              return;
+            }
+            payload[pat] = rule.accounts;
+          }
+          const res = await apiFetch('/api/model-pools', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_pools: payload })
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          modelPoolsCache = data.model_pools || {};
+          renderModelPoolsPill(modelPoolsCache);
+          renderAccounts(accountsCache);
+          showToast('Strict model account pools saved', 'success');
+          closeModelPoolsModal();
+        } catch (e) {
+          showToast(`Failed to save model pools: ${e.message}`, 'error');
+        }
+      });
+    }
   </script>
+
+  <!-- Modal Dialog: Strict Per-Model Account Pools -->
+  <div class="modal-backdrop" id="modelPoolsModal" onclick="if(event.target===this)closeModelPoolsModal()">
+    <div class="modal-box" style="max-width: 640px;">
+      <div class="modal-header">
+        <div class="modal-title">
+          <svg class="btn-svg" viewBox="0 0 24 24" style="color:var(--purple);"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/></svg>
+          <span>Per-Model Account Pool Routing (Strict)</span>
+        </div>
+        <button class="modal-close" onclick="closeModelPoolsModal()">
+          <svg class="btn-svg" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body" style="gap: 14px;">
+        <div style="font-size: 0.78rem; color: var(--text-muted); line-height: 1.5;">
+          Bind specific models or wildcards (e.g. <code>claude-sonnet-4-6</code>, <code>gemini-2.5-pro</code>, <code>claude*</code>, <code>*</code>) to dedicated account pools.
+          <b style="color:#fff;">Strict Mode:</b> Requests matching a rule will only rotate within its assigned accounts and return <code>429</code> if all assigned accounts are exhausted.
+        </div>
+
+        <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
+          <span style="font-size: 0.72rem; color: var(--text-muted); font-family: var(--font-mono);">Quick Add:</span>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('claude-sonnet-4-6')">+ claude-sonnet-4-6</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('claude-opus-4-6-thinking')">+ claude-opus-4-6-thinking</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini-2.5-pro')">+ gemini-2.5-pro</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini-2.5-flash')">+ gemini-2.5-flash</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('claude*')">+ claude*</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini*')">+ gemini*</button>
+          <button type="button" class="card-btn" style="color:var(--accent); border-color:rgba(56,189,248,0.3);" onclick="addDraftModelPoolRule('')">+ Custom Rule</button>
+        </div>
+
+        <div id="modelPoolsRulesList" style="display: flex; flex-direction: column; gap: 10px; max-height: 360px; overflow-y: auto;"></div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px; gap: 10px;">
+          <button type="button" onclick="draftModelPools=[]; renderModelPoolsEditor();" class="card-btn" style="height: 32px; font-size: 0.75rem; color: var(--text-muted);">
+            Clear All Rules
+          </button>
+          <div style="display: flex; gap: 8px;">
+            <button type="button" onclick="closeModelPoolsModal()" style="height: 32px; font-size: 0.76rem;">Cancel</button>
+            <button type="button" onclick="saveModelPoolsConfig(this)" class="primary" style="height: 32px; font-size: 0.76rem;">
+              <span>Save Model Pools</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Modal Dialog: Auto-Warmup Schedule Settings -->
   <div class="modal-backdrop" id="scheduleModal" onclick="if(event.target===this)closeScheduleModal()">

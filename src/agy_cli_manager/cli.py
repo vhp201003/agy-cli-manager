@@ -7,11 +7,13 @@ except ImportError:
     curses = None
 import json
 import os
+import re
 import subprocess
 import textwrap
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Empty, SimpleQueue
@@ -23,8 +25,18 @@ from agy_cli_manager.manager import (
     clear_bad,
     connect_gateway,
     default_root,
+    default_live_dir,
+    delete_gateway_account,
     disconnect_gateway,
     ensure_active_account,
+    export_account_payload,
+    list_gateway_accounts,
+    load_client_config,
+    load_server_admin_key,
+    push_account_to_gateway,
+    rotate_server_admin_key,
+    update_gateway_account,
+    validate_account_name,
     ensure_layout,
     format_status,
     get_account_identity,
@@ -255,11 +267,15 @@ def build_parser() -> argparse.ArgumentParser:
     server_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     server_service = server_sub.add_parser("service", help="Show systemd / background service status or template")
     server_service.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    server_admin_key = server_sub.add_parser("admin-key", help="Print or rotate the Admin API key")
+    server_admin_key.add_argument("--rotate", action="store_true", help="Invalidate the current key and generate a new one")
+    server_admin_key.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     client_cmd = sub.add_parser("client", help="Client connection and developer environment commands")
     client_sub = client_cmd.add_subparsers(dest="client_action")
     client_conn = client_sub.add_parser("connect", help="Connect to an AGY Gateway")
     client_conn.add_argument("url", help="Gateway URL, e.g. http://<server-ip>:8800")
+    client_conn.add_argument("--admin-key", help="Admin API key for gateway account administration")
     client_conn.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     client_status = client_sub.add_parser("status", help="Show current client connection status and proxy endpoint")
     client_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
@@ -268,6 +284,26 @@ def build_parser() -> argparse.ArgumentParser:
     client_sub.add_parser("dashboard", help="Open the connected gateway dashboard in web browser")
     client_test = client_sub.add_parser("test", help="Test connectivity to the configured proxy endpoint")
     client_test.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    client_push = client_sub.add_parser("push", help="Push a local Antigravity account to the connected gateway")
+    client_push.add_argument("name", nargs="?", help="Account name on the gateway (derived from the email when omitted)")
+    client_push.add_argument("--source-dir", help="Antigravity profile directory to package (default: ~/.gemini)")
+    client_push.add_argument("--overwrite", action="store_true", help="Replace an existing gateway account")
+    client_push.add_argument("--set-active", action="store_true", help="Make the pushed account the active one")
+    client_push.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    client_account = client_sub.add_parser("account", help="Manage accounts on the connected gateway")
+    client_account_sub = client_account.add_subparsers(dest="account_action")
+    client_account_list = client_account_sub.add_parser("list", help="List gateway accounts")
+    client_account_list.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    client_account_delete = client_account_sub.add_parser("delete", help="Delete an account from the gateway")
+    client_account_delete.add_argument("name", help="Account name on the gateway")
+    client_account_delete.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    client_account_delete.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    client_account_enable = client_account_sub.add_parser("enable", help="Enable a gateway account")
+    client_account_enable.add_argument("name", help="Account name on the gateway")
+    client_account_enable.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    client_account_disable = client_account_sub.add_parser("disable", help="Disable a gateway account")
+    client_account_disable.add_argument("name", help="Account name on the gateway")
+    client_account_disable.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     return parser
 
@@ -1896,9 +1932,188 @@ def handle_server_service(paths, as_json: bool = False) -> int:
     return 0
 
 
-def handle_client_connect(paths, url: str, as_json: bool = False) -> int:
+def _resolve_admin_key(paths, explicit: str | None = None) -> str:
+    """Admin key precedence: explicit flag, environment, saved client config, prompt."""
+    key = (explicit or os.environ.get("AGY_ADMIN_KEY") or "").strip()
+    if not key:
+        key = str(load_client_config(paths.root).get("admin_key") or "").strip()
+    if not key and sys.stdin.isatty():
+        key = prompt_nonempty("Admin API key")
+    return key
+
+
+def _gateway_url_for_display(paths) -> str:
+    cfg = load_client_config(paths.root)
+    return str(os.environ.get("AGY_GATEWAY_URL") or cfg.get("gateway_url") or "http://127.0.0.1:8800").strip()
+
+
+def _warn_plaintext_transport(gateway_url: str) -> None:
+    parsed = urllib.parse.urlparse(gateway_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+        print("[!] WARNING: account credentials travel in plain HTTP. Use HTTPS or a trusted network.")
+
+
+def _quota_percent(bucket) -> str:
+    if not isinstance(bucket, dict):
+        return "n/a"
+    percent = bucket.get("percent")
     try:
-        cfg = connect_gateway(url, paths)
+        return f"{round(float(percent))}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def handle_client_push(
+    paths,
+    name: str | None = None,
+    source_dir: str | None = None,
+    overwrite: bool = False,
+    set_active: bool = False,
+    as_json: bool = False,
+    gateway_url: str | None = None,
+    admin_key: str | None = None,
+) -> int:
+    source = Path(source_dir).expanduser() if source_dir else default_live_dir()
+    try:
+        payload = export_account_payload(paths, source_dir=source)
+    except ValueError:
+        print(f"[ERROR] No active Antigravity CLI session found in {source}. Please run 'agy login' first.")
+        return 1
+
+    identity = payload.get("identity") or {}
+    email = str(identity.get("email") or "")
+    if not as_json:
+        print(f"[+] Reading local Antigravity credentials from {source}...")
+        if email:
+            print(f"[+] Detected Google Identity: {email}")
+
+    resolved_name = str(name or "").strip()
+    if not resolved_name:
+        local_part = email.split("@")[0] if "@" in email else (email or "account")
+        resolved_name = re.sub(r"[^a-zA-Z0-9._-]", "_", local_part).strip("._-") or "account"
+    try:
+        resolved_name = validate_account_name(resolved_name)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    target_gateway = gateway_url or _gateway_url_for_display(paths)
+    if not as_json:
+        _warn_plaintext_transport(target_gateway)
+        print(f"[+] Transmitting payload to {target_gateway}...")
+
+    try:
+        result = push_account_to_gateway(
+            paths,
+            name=resolved_name,
+            source_dir=source,
+            payload=payload,
+            overwrite=overwrite,
+            set_active=set_active,
+            gateway_url=gateway_url,
+            admin_key=admin_key,
+        )
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    if as_json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    print(f"[OK] Account '{resolved_name}' successfully registered on Gateway Server.")
+    print(f"     Pool Status: {result.get('pool_size', '-')} accounts active")
+    print("     Quota: Synchronized")
+    return 0
+
+
+def handle_client_account_list(paths, as_json: bool = False) -> int:
+    try:
+        listing = list_gateway_accounts(paths)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    if as_json:
+        print(json.dumps(listing, indent=2, sort_keys=True))
+        return 0
+
+    headers = ("NAME", "EMAIL", "HEALTH", "STATUS", "5H QUOTA", "WEEKLY QUOTA")
+    rows = [headers]
+    for account_name, meta in (listing.get("accounts") or {}).items():
+        quota = (meta.get("quota") or {}).get("gemini") or {}
+        rows.append(
+            (
+                str(account_name),
+                str(meta.get("email") or "-"),
+                str(meta.get("health_status") or "-"),
+                str(meta.get("status") or "-"),
+                _quota_percent(quota.get("5h")),
+                _quota_percent(quota.get("weekly")),
+            )
+        )
+    widths = [max(len(row[index]) for row in rows) for index in range(len(headers))]
+    for row in rows:
+        print(" | ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)).rstrip())
+    return 0
+
+
+def handle_client_account_delete(paths, name: str, assume_yes: bool = False, as_json: bool = False) -> int:
+    if not assume_yes:
+        answer = input(f"Delete account '{name}' on the gateway? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            print("Aborted.")
+            return 0
+
+    try:
+        result = delete_gateway_account(paths, name)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    if as_json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"[OK] Account '{name}' deleted.")
+    return 0
+
+
+def _set_account_enabled(paths, name: str, enabled: bool, as_json: bool) -> int:
+    try:
+        result = update_gateway_account(paths, name, enabled=enabled)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    if as_json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"[OK] Account '{name}' {'enabled' if enabled else 'disabled'}.")
+    return 0
+
+
+def handle_client_account_enable(paths, name: str, as_json: bool = False) -> int:
+    return _set_account_enabled(paths, name, True, as_json)
+
+
+def handle_client_account_disable(paths, name: str, as_json: bool = False) -> int:
+    return _set_account_enabled(paths, name, False, as_json)
+
+
+def handle_server_admin_key(paths, rotate: bool = False, as_json: bool = False) -> int:
+    key = rotate_server_admin_key(paths) if rotate else load_server_admin_key(paths)
+    if as_json:
+        print(json.dumps({"admin_key": key, "rotated": bool(rotate)}, indent=2, sort_keys=True))
+        return 0
+    print(key)
+    return 0
+
+
+def handle_client_connect(paths, url: str, as_json: bool = False, admin_key: str | None = None) -> int:
+    resolved_key = _resolve_admin_key(paths, admin_key)
+    try:
+        cfg = connect_gateway(url, paths, admin_key=resolved_key or None)
     except Exception as e:
         if as_json:
             print(json.dumps({"success": False, "error": str(e)}, indent=2))
@@ -1914,6 +2129,8 @@ def handle_client_connect(paths, url: str, as_json: bool = False) -> int:
     print(f"  Proxy endpoint:    http://{cfg['proxy_host']}:{cfg['proxy_port']}")
     print(f"  Active accounts:   {cfg.get('available_accounts', 0)} / {cfg.get('pool_size', 0)}")
     print(f"  Root CA trust:     {'Installed' if cfg.get('ca_installed') else 'Skipped/Unavailable'}")
+    if cfg.get("admin_key"):
+        print("  Admin API key:     Stored for account administration")
     print(f"\nRun 'agy-run' to send CLI requests through this gateway.")
     return 0
 
@@ -2461,11 +2678,13 @@ def main() -> int:
                 return 0
             if action == "service":
                 return handle_server_service(paths, getattr(args, "json", False))
+            if action == "admin-key":
+                return handle_server_admin_key(paths, getattr(args, "rotate", False), getattr(args, "json", False))
             return 0
         if args.command == "client":
             action = getattr(args, "client_action", None) or "status"
             if action == "connect":
-                return handle_client_connect(paths, args.url, getattr(args, "json", False))
+                return handle_client_connect(paths, args.url, getattr(args, "json", False), getattr(args, "admin_key", None))
             if action == "status":
                 return handle_client_status(paths, getattr(args, "json", False))
             if action == "disconnect":
@@ -2474,6 +2693,26 @@ def main() -> int:
                 return handle_client_dashboard(paths)
             if action == "test":
                 return handle_client_test(paths, getattr(args, "json", False))
+            if action == "push":
+                return handle_client_push(
+                    paths,
+                    name=getattr(args, "name", None),
+                    source_dir=getattr(args, "source_dir", None),
+                    overwrite=getattr(args, "overwrite", False),
+                    set_active=getattr(args, "set_active", False),
+                    as_json=getattr(args, "json", False),
+                )
+            if action == "account":
+                account_action = getattr(args, "account_action", None) or "list"
+                if account_action == "list":
+                    return handle_client_account_list(paths, getattr(args, "json", False))
+                if account_action == "delete":
+                    return handle_client_account_delete(paths, args.name, getattr(args, "yes", False), getattr(args, "json", False))
+                if account_action == "enable":
+                    return handle_client_account_enable(paths, args.name, getattr(args, "json", False))
+                if account_action == "disable":
+                    return handle_client_account_disable(paths, args.name, getattr(args, "json", False))
+                return 0
             return 0
         if args.command == "run":
             extra = list(args.extra_args or [])
@@ -2521,8 +2760,12 @@ def server_entrypoint() -> int:
     service_p = sub.add_parser("service", help="Show systemd / background service status or template")
     service_p.add_argument("--json", action="store_true")
 
+    admin_key_p = sub.add_parser("admin-key", help="Print or rotate the Admin API key")
+    admin_key_p.add_argument("--rotate", action="store_true", help="Invalidate the current key and generate a new one")
+    admin_key_p.add_argument("--json", action="store_true")
+
     raw_args = sys.argv[1:]
-    if not raw_args or (raw_args[0].startswith("-") and raw_args[0] not in ("-h", "--help")):
+    if not raw_args or (raw_args[0].startswith("-") and raw_args[0] not in ("-h", "--help", "--root")):
         raw_args = ["start"] + raw_args
 
     args = parser.parse_args(raw_args)
@@ -2546,6 +2789,8 @@ def server_entrypoint() -> int:
         return 0
     if args.action == "service":
         return handle_server_service(paths, args.json)
+    if args.action == "admin-key":
+        return handle_server_admin_key(paths, args.rotate, args.json)
 
     parser.print_help()
     return 0
@@ -2559,6 +2804,7 @@ def client_entrypoint() -> int:
 
     conn_p = sub.add_parser("connect", help="Connect to an AGY Gateway")
     conn_p.add_argument("url", help="Gateway URL, e.g. http://<server-ip>:8800")
+    conn_p.add_argument("--admin-key", help="Admin API key for gateway account administration")
     conn_p.add_argument("--json", action="store_true")
 
     stat_p = sub.add_parser("status", help="Show connection and proxy status")
@@ -2572,6 +2818,28 @@ def client_entrypoint() -> int:
     test_p = sub.add_parser("test", help="Test connectivity to gateway")
     test_p.add_argument("--json", action="store_true")
 
+    push_p = sub.add_parser("push", help="Push a local Antigravity account to the connected gateway")
+    push_p.add_argument("name", nargs="?", help="Account name on the gateway (derived from the email when omitted)")
+    push_p.add_argument("--source-dir", help="Antigravity profile directory to package (default: ~/.gemini)")
+    push_p.add_argument("--overwrite", action="store_true", help="Replace an existing gateway account")
+    push_p.add_argument("--set-active", action="store_true", help="Make the pushed account the active one")
+    push_p.add_argument("--json", action="store_true")
+
+    account_p = sub.add_parser("account", help="Manage accounts on the connected gateway")
+    account_sub = account_p.add_subparsers(dest="account_action")
+    account_list = account_sub.add_parser("list", help="List gateway accounts")
+    account_list.add_argument("--json", action="store_true")
+    account_delete = account_sub.add_parser("delete", help="Delete an account from the gateway")
+    account_delete.add_argument("name", help="Account name on the gateway")
+    account_delete.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    account_delete.add_argument("--json", action="store_true")
+    account_enable = account_sub.add_parser("enable", help="Enable a gateway account")
+    account_enable.add_argument("name", help="Account name on the gateway")
+    account_enable.add_argument("--json", action="store_true")
+    account_disable = account_sub.add_parser("disable", help="Disable a gateway account")
+    account_disable.add_argument("name", help="Account name on the gateway")
+    account_disable.add_argument("--json", action="store_true")
+
     raw_args = sys.argv[1:]
     if not raw_args:
         raw_args = ["status"]
@@ -2580,7 +2848,7 @@ def client_entrypoint() -> int:
     paths = build_paths(args.root)
 
     if args.action == "connect":
-        return handle_client_connect(paths, args.url, args.json)
+        return handle_client_connect(paths, args.url, args.json, args.admin_key)
     if args.action == "status":
         return handle_client_status(paths, args.json)
     if args.action == "disconnect":
@@ -2589,6 +2857,26 @@ def client_entrypoint() -> int:
         return handle_client_dashboard(paths)
     if args.action == "test":
         return handle_client_test(paths, args.json)
+    if args.action == "push":
+        return handle_client_push(
+            paths,
+            name=args.name,
+            source_dir=args.source_dir,
+            overwrite=args.overwrite,
+            set_active=args.set_active,
+            as_json=args.json,
+        )
+    if args.action == "account":
+        account_action = getattr(args, "account_action", None) or "list"
+        if account_action == "list":
+            return handle_client_account_list(paths, args.json)
+        if account_action == "delete":
+            return handle_client_account_delete(paths, args.name, args.yes, args.json)
+        if account_action == "enable":
+            return handle_client_account_enable(paths, args.name, args.json)
+        if account_action == "disable":
+            return handle_client_account_disable(paths, args.name, args.json)
+        return 0
 
     parser.print_help()
     return 0

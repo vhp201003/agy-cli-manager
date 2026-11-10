@@ -27,16 +27,16 @@ for _p in (str(_current), str(_parent)):
 
 try:
     from agy_cli_manager.proxy.cert_manager import CertManager
-    from agy_cli_manager.proxy.token_manager import TokenManager
+    from agy_cli_manager.proxy.token_manager import TokenManager, ModelPoolExhaustedError
     from agy_cli_manager.proxy.db import get_telemetry_db
 except ImportError:
     try:
         from cert_manager import CertManager
-        from token_manager import TokenManager
+        from token_manager import TokenManager, ModelPoolExhaustedError
         from db import get_telemetry_db
     except ImportError:
         from .cert_manager import CertManager
-        from .token_manager import TokenManager
+        from .token_manager import TokenManager, ModelPoolExhaustedError
         from .db import get_telemetry_db
 
 logging.basicConfig(
@@ -449,7 +449,45 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
         session_key = _extract_session_key(path, headers, body_str, raw_body=body)
 
         for attempt in range(max_attempts):
-            acc_name, access_token = self.token_manager.get_token_by_session(session_key, model_name=model_name)
+            routing_model = None if model_name in ("Quota Telemetry", "CodeAssist Auth", "Experiments", "API Request") else model_name
+            try:
+                acc_name, access_token = self.token_manager.get_token_by_session(session_key, model_name=routing_model)
+            except ModelPoolExhaustedError as pool_err:
+                logger.warning(f"[429 Pool Exhausted] {pool_err}")
+                err_payload = {
+                    "error": {
+                        "code": 429,
+                        "message": str(pool_err),
+                        "status": "RESOURCE_EXHAUSTED",
+                    }
+                }
+                err_bytes = json.dumps(err_payload).encode("utf-8")
+                broadcast_event({
+                    "id": str(uuid.uuid4())[:8],
+                    "time": time.strftime("%H:%M:%S"),
+                    "method": method,
+                    "path": path,
+                    "host": host,
+                    "account": "POOL_EXHAUSTED",
+                    "model": model_name,
+                    "inbound_token": inbound_preview,
+                    "overridden_token": "None (Strict Pool Exhausted)",
+                    "status": 429,
+                    "status_text": "429 Strict Model Pool Exhausted",
+                    "latency_ms": 0.0,
+                    "body": body_str,
+                    "body_size": body_size,
+                    "response_preview": json.dumps(err_payload, indent=2),
+                    "response_size": len(err_bytes),
+                    "retried": attempt > 0,
+                })
+                client_sock.sendall(
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: "
+                    + str(len(err_bytes)).encode("latin1")
+                    + b"\r\nConnection: close\r\n\r\n"
+                    + err_bytes
+                )
+                return
             out_headers = dict(headers)
             out_headers["host"] = host
             out_headers["authorization"] = f"Bearer {access_token}"

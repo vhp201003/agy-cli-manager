@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ctypes
+import fnmatch
 import json
 import logging
 import os
 from pathlib import Path
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -18,6 +20,33 @@ from agy_cli_manager.proxy.credential_provider import get_credential_provider, C
 logger = logging.getLogger("AgyProxy.TokenManager")
 
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+class ModelPoolExhaustedError(RuntimeError):
+    def __init__(self, model_name: str, pool: list[str], message: str | None = None) -> None:
+        self.model_name = model_name
+        self.pool = list(pool)
+        super().__init__(
+            message or f"All accounts in configured pool for model '{model_name}' ({', '.join(pool) or 'empty'}) are exhausted or unavailable."
+        )
+
+
+def _save_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_file = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_file, path)
+    finally:
+        if os.path.exists(tmp_file):
+            try:
+                os.unlink(tmp_file)
+            except OSError:
+                pass
+
 
 
 def parse_reset_time_epoch(reset_time_val: str | int | float | None) -> float | None:
@@ -95,20 +124,174 @@ class TokenManager:
         )
         self.provider: CredentialProvider = get_credential_provider(self.manager_root)
         self.state_file = self.manager_root / "state.json"
+        self.config_file = self.manager_root / "config.json"
         self._accounts: dict[str, dict] = {}
         self._cooldowns: dict[str, float] = {}
         self._quarantines: dict[str, dict] = {}
+        self._model_pools: dict[str, list[str]] = {}
         self._current_active_account: str | None = None
         self.reload_accounts()
+        self.reload_model_pools()
+
+    def reload_model_pools(self) -> dict[str, list[str]]:
+        with self._lock:
+            pools: dict[str, list[str]] = {}
+            if self.config_file.is_file():
+                try:
+                    cfg = json.loads(self.config_file.read_text(encoding="utf-8"))
+                    raw_pools = cfg.get("model_pools")
+                    if isinstance(raw_pools, dict):
+                        for pat, accs in raw_pools.items():
+                            pat_str = str(pat).strip()
+                            if not pat_str:
+                                continue
+                            if isinstance(accs, str):
+                                acc_list = [a.strip() for a in accs.split(",") if a.strip()]
+                            elif isinstance(accs, list):
+                                acc_list = [str(a).strip() for a in accs if str(a).strip()]
+                            else:
+                                continue
+                            seen: list[str] = []
+                            for a in acc_list:
+                                if a not in seen:
+                                    seen.append(a)
+                            pools[pat_str] = seen
+                except Exception as exc:
+                    logger.warning(f"Failed to read model_pools from config.json: {exc}")
+            self._model_pools = pools
+            return dict(self._model_pools)
+
+    def get_model_pools(self) -> dict[str, list[str]]:
+        with self._lock:
+            return {k: list(v) for k, v in self._model_pools.items()}
+
+    def set_model_pools(self, pools: dict[str, list[str] | str]) -> dict[str, list[str]]:
+        with self._lock:
+            cleaned: dict[str, list[str]] = {}
+            if isinstance(pools, dict):
+                for pat, accs in pools.items():
+                    pat_str = str(pat).strip()
+                    if not pat_str:
+                        continue
+                    if isinstance(accs, str):
+                        acc_list = [a.strip() for a in accs.split(",") if a.strip()]
+                    elif isinstance(accs, list):
+                        acc_list = [str(a).strip() for a in accs if str(a).strip()]
+                    else:
+                        continue
+                    seen: list[str] = []
+                    for a in acc_list:
+                        if a not in seen:
+                            seen.append(a)
+                    if seen:
+                        cleaned[pat_str] = seen
+
+            full_cfg = {}
+            if self.config_file.is_file():
+                try:
+                    full_cfg = json.loads(self.config_file.read_text(encoding="utf-8"))
+                except Exception:
+                    full_cfg = {}
+            full_cfg["model_pools"] = cleaned
+            _save_json_atomic(self.config_file, full_cfg)
+            self._model_pools = cleaned
+            return self.get_model_pools()
+
+    def set_model_pool_rule(self, pattern: str, accounts: list[str] | str) -> dict[str, list[str]]:
+        with self._lock:
+            pat_str = str(pattern).strip()
+            if not pat_str:
+                raise ValueError("Model pattern cannot be empty")
+            current = self.get_model_pools()
+            if isinstance(accounts, str):
+                acc_list = [a.strip() for a in accounts.split(",") if a.strip()]
+            elif isinstance(accounts, list):
+                acc_list = [str(a).strip() for a in accounts if str(a).strip()]
+            else:
+                acc_list = []
+            if not acc_list:
+                current.pop(pat_str, None)
+            else:
+                current[pat_str] = acc_list
+            return self.set_model_pools(current)
+
+    def delete_model_pool_rule(self, pattern: str) -> dict[str, list[str]]:
+        with self._lock:
+            pat_str = str(pattern).strip()
+            current = self.get_model_pools()
+            current.pop(pat_str, None)
+            return self.set_model_pools(current)
+
+    def resolve_pool_for_model(self, model_name: str | None) -> tuple[str | None, list[str] | None]:
+        with self._lock:
+            if not self._model_pools:
+                return None, None
+
+            candidates: list[str] = []
+            if model_name:
+                raw_m = str(model_name).strip().lower()
+                if raw_m:
+                    candidates.append(raw_m)
+                    for sep in ("|", ",", ";"):
+                        if sep in raw_m:
+                            for part in raw_m.split(sep):
+                                p = part.strip()
+                                if p and p not in candidates:
+                                    candidates.append(p)
+
+            # 1. Exact match (case-insensitive)
+            for m_norm in candidates:
+                for pat, accs in self._model_pools.items():
+                    if pat.lower() == m_norm:
+                        return pat, list(accs)
+
+            # 2. Specific wildcard match (longest non-wildcard pattern first)
+            for m_norm in candidates:
+                wildcard_matches: list[tuple[int, str, list[str]]] = []
+                for pat, accs in self._model_pools.items():
+                    pat_low = pat.lower()
+                    if pat_low == "*":
+                        continue
+                    if ("*" in pat_low or "?" in pat_low or "[" in pat_low) and fnmatch.fnmatch(m_norm, pat_low):
+                        specificity = len(pat_low.replace("*", "").replace("?", ""))
+                        wildcard_matches.append((specificity, pat, list(accs)))
+                if wildcard_matches:
+                    wildcard_matches.sort(key=lambda item: (-item[0], item[1]))
+                    _, best_pat, best_accs = wildcard_matches[0]
+                    return best_pat, best_accs
+
+            # 3. Catch-all '*' rule
+            for pat, accs in self._model_pools.items():
+                if pat.strip() == "*":
+                    return pat, list(accs)
+
+            return None, None
+
+    def _is_account_disabled(self, account_name: str) -> bool:
+        if not self.state_file.is_file():
+            return False
+        try:
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
+            meta = (state.get("accounts") or {}).get(account_name)
+        except Exception:
+            return False
+        return isinstance(meta, dict) and not meta.get("enabled", True)
 
     def reload_accounts(self) -> None:
         with self._lock:
             account_names: list[str] = []
             active = None
+            disabled: set[str] = set()
             if self.state_file.is_file():
                 try:
                     state = json.loads(self.state_file.read_text(encoding="utf-8"))
-                    account_names = list(state.get("accounts", {}).keys())
+                    accounts_state = state.get("accounts") or {}
+                    account_names = list(accounts_state.keys())
+                    disabled = {
+                        name
+                        for name, meta in accounts_state.items()
+                        if isinstance(meta, dict) and not meta.get("enabled", True)
+                    }
                     active = state.get("active")
                     if active and active in account_names:
                         account_names.remove(active)
@@ -117,14 +300,26 @@ class TokenManager:
                     pass
 
             for name in account_names:
+                if name in disabled:
+                    # A disabled account must not stay routable just because it
+                    # was loaded before it was disabled.
+                    self._accounts.pop(name, None)
+                    continue
                 data = self.provider.read_account(name)
+                if not data:
+                    fallback_tok_path = self.manager_root / "accounts" / name / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+                    if fallback_tok_path.is_file():
+                        try:
+                            data = json.loads(fallback_tok_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            data = None
                 if data and "token" in data:
                     tok = data["token"]
                     access_token = tok.get("access_token")
                     if access_token:
                         existing = self._accounts.get(name, {})
                         # Preserve newer in-memory token if local file was not updated yet
-                        if existing.get("access_token") and existing.get("expires_at", 0) > tok.get("expiry_timestamp", 0):
+                        if existing.get("access_token") and existing.get("expires_at", 0) > (tok.get("expiry_timestamp") or 0):
                             continue
 
                         # Calculate expiry
@@ -183,6 +378,79 @@ class TokenManager:
 
             if self._current_active_account is None and self._accounts:
                 self._current_active_account = next(iter(self._accounts))
+
+    def hot_reload_account(self, account_name: str, fetch_quota: bool = False) -> bool:
+        with self._lock:
+            if self._is_account_disabled(account_name):
+                self._accounts.pop(account_name, None)
+                return False
+            data = self.provider.read_account(account_name)
+            if not data:
+                fallback_tok_path = (
+                    self.manager_root / "accounts" / account_name / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+                )
+                if fallback_tok_path.is_file():
+                    try:
+                        data = json.loads(fallback_tok_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        data = None
+            if not data or not isinstance(data.get("token"), dict):
+                return False
+            tok = data["token"]
+            access_token = str(tok.get("access_token") or "").strip()
+            if not access_token:
+                return False
+            expires_at = tok.get("expiry_timestamp") or (time.time() + 3600)
+            email = data.get("email") or tok.get("email") or account_name
+            display_name = data.get("name") or tok.get("name") or account_name
+            existing = self._accounts.get(account_name, {})
+            self._accounts[account_name] = {
+                "name": account_name,
+                "access_token": access_token,
+                "refresh_token": tok.get("refresh_token"),
+                "expiry": tok.get("expiry"),
+                "expires_at": float(expires_at),
+                "email": email,
+                "display_name": display_name,
+                "last_refreshed": existing.get("last_refreshed", 0),
+            }
+            if self._current_active_account is None:
+                self._current_active_account = account_name
+        if fetch_quota:
+            try:
+                self.fetch_account_quota(account_name)
+            except Exception:
+                pass
+        return True
+
+    def set_current_active_account(self, account_name: str | None) -> None:
+        with self._lock:
+            self._current_active_account = account_name
+
+    def remove_account(self, account_name: str) -> bool:
+        with self._lock:
+            existed = account_name in self._accounts
+            self._accounts.pop(account_name, None)
+            self._cooldowns.pop(account_name, None)
+            self._quarantines.pop(account_name, None)
+            if hasattr(self, "_quotas") and isinstance(getattr(self, "_quotas"), dict):
+                getattr(self, "_quotas").pop(account_name, None)
+            if self._current_active_account == account_name:
+                self._current_active_account = next(iter(self._accounts), None)
+            if self._model_pools:
+                updated_pools: dict[str, list[str]] = {}
+                changed = False
+                for pat, accs in self._model_pools.items():
+                    if account_name in accs:
+                        changed = True
+                        remaining = [a for a in accs if a != account_name]
+                        if remaining:
+                            updated_pools[pat] = remaining
+                    else:
+                        updated_pools[pat] = list(accs)
+                if changed:
+                    self.set_model_pools(updated_pools)
+            return existed
 
     def refresh_account_token(self, account_name: str) -> tuple[bool, str]:
         with self._lock:
@@ -352,11 +620,30 @@ class TokenManager:
                 raise RuntimeError("No accounts available in pool.")
 
             now = time.time()
+            matched_pattern, configured_pool = self.resolve_pool_for_model(model_name)
+            is_strict_pool = configured_pool is not None
 
-            # 1. Exclude quarantined accounts unless all accounts are quarantined
-            healthy_pool = [name for name in self._accounts if not self.is_quarantined(name)]
+            if is_strict_pool:
+                candidate_pool = [name for name in configured_pool if name in self._accounts]
+                if not candidate_pool:
+                    raise ModelPoolExhaustedError(
+                        model_name or "*",
+                        configured_pool,
+                        f"Configured account pool for model '{model_name or '*'}' (rule '{matched_pattern}') has no valid accounts in pool: {configured_pool}",
+                    )
+            else:
+                candidate_pool = list(self._accounts.keys())
+
+            # 1. Exclude quarantined accounts
+            healthy_pool = [name for name in candidate_pool if not self.is_quarantined(name)]
             if not healthy_pool:
-                healthy_pool = list(self._accounts.keys())
+                if is_strict_pool:
+                    raise ModelPoolExhaustedError(
+                        model_name or "*",
+                        candidate_pool,
+                        f"All accounts in pool for model '{model_name or '*'}' (rule '{matched_pattern}') are quarantined: {candidate_pool}",
+                    )
+                healthy_pool = list(candidate_pool)
 
             # 2. Exclude accounts in 429 cooldown
             cooldown_ok = [
@@ -365,6 +652,12 @@ class TokenManager:
                 if self._cooldowns.get(name, 0) <= now
             ]
             if not cooldown_ok:
+                if is_strict_pool:
+                    raise ModelPoolExhaustedError(
+                        model_name or "*",
+                        candidate_pool,
+                        f"All accounts in pool for model '{model_name or '*'}' (rule '{matched_pattern}') are in 429 cooldown: {candidate_pool}",
+                    )
                 oldest = min(healthy_pool, key=lambda x: self._cooldowns.get(x, 0))
                 cooldown_ok = [oldest]
 
@@ -394,6 +687,12 @@ class TokenManager:
                 alive_pool.append(name)
 
             if not alive_pool:
+                if is_strict_pool:
+                    raise ModelPoolExhaustedError(
+                        model_name or "*",
+                        candidate_pool,
+                        f"All accounts in pool for model '{model_name or '*'}' (rule '{matched_pattern}') have exhausted {target_family} quota: {candidate_pool}",
+                    )
                 alive_pool = cooldown_ok
 
             # 4. Expiry-Aware Sorting (Perishable Quota Arbitrage):

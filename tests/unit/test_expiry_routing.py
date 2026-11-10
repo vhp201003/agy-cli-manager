@@ -158,11 +158,13 @@ def test_quarantine_endpoints(monkeypatch, tmp_path: Path):
         }
     }
     monkeypatch.setattr(fastapi_module, "tm_instance", tm)
+    monkeypatch.setenv("AGY_ADMIN_KEY", "expiry-test-admin-key")
+    admin_headers = {"X-Admin-Key": "expiry-test-admin-key"}
 
     client = TestClient(fastapi_module.app)
 
     # 1. Post quarantine
-    resp = client.post("/api/accounts/test_acc/quarantine", json={"reason": "test_quarantine", "duration_seconds": 600})
+    resp = client.post("/api/accounts/test_acc/quarantine", headers=admin_headers, json={"reason": "test_quarantine", "duration_seconds": 600})
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"]["in_quarantine"] is True
@@ -170,23 +172,23 @@ def test_quarantine_endpoints(monkeypatch, tmp_path: Path):
     assert data["status"]["priority_tier"] == 4
 
     # 2. Clear quarantine
-    resp2 = client.post("/api/accounts/test_acc/clear-quarantine")
+    resp2 = client.post("/api/accounts/test_acc/clear-quarantine", headers=admin_headers)
     assert resp2.status_code == 200
     data2 = resp2.json()
     assert data2["status"]["in_quarantine"] is False
     assert data2["status"]["is_active"] is True
 
     # 3. 404 on nonexistent account
-    assert client.post("/api/accounts/ghost_acc/quarantine", json={"reason": "test"}).status_code == 404
-    assert client.post("/api/accounts/ghost_acc/clear-quarantine").status_code == 404
-    assert client.post("/api/accounts/ghost_acc/clear-cooldown").status_code == 404
+    assert client.post("/api/accounts/ghost_acc/quarantine", headers=admin_headers, json={"reason": "test"}).status_code == 404
+    assert client.post("/api/accounts/ghost_acc/clear-quarantine", headers=admin_headers).status_code == 404
+    assert client.post("/api/accounts/ghost_acc/clear-cooldown", headers=admin_headers).status_code == 404
 
     # 4. Duration clamping
-    resp_clamp_low = client.post("/api/accounts/test_acc/quarantine", json={"duration_seconds": 10})
+    resp_clamp_low = client.post("/api/accounts/test_acc/quarantine", headers=admin_headers, json={"duration_seconds": 10})
     assert resp_clamp_low.status_code == 200
     assert "Quarantined test_acc for 60s" in resp_clamp_low.json()["message"]
 
-    resp_clamp_high = client.post("/api/accounts/test_acc/quarantine", json={"duration_seconds": 9999999})
+    resp_clamp_high = client.post("/api/accounts/test_acc/quarantine", headers=admin_headers, json={"duration_seconds": 9999999})
     assert resp_clamp_high.status_code == 200
     assert "Quarantined test_acc for 604800s" in resp_clamp_high.json()["message"]
 

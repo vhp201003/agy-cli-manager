@@ -23,10 +23,13 @@ class TestAnalyticsEndpoint(unittest.TestCase):
         self.mock_db = TelemetryDB(db_path=self.db_path)
         self.patcher = patch("agy_cli_manager.proxy.fastapi_app.get_telemetry_db", return_value=self.mock_db)
         self.patcher.start()
+        self.key_patcher = patch.dict("os.environ", {"AGY_ADMIN_KEY": "analytics-test-admin-key"})
+        self.key_patcher.start()
         self.client = TestClient(app)
 
     def tearDown(self):
         self.patcher.stop()
+        self.key_patcher.stop()
         self.mock_db.close()
         try:
             self.tmp_dir.cleanup()
@@ -96,7 +99,11 @@ class TestAnalyticsEndpoint(unittest.TestCase):
         self.assertIn("retry_state", data)
         self.assertIn("next_run", data)
 
-        resp_post = self.client.post("/api/schedule/warmup", json={"enabled": False, "times": ["06:00", "18:00"]})
+        resp_post = self.client.post(
+            "/api/schedule/warmup",
+            headers={"X-Admin-Key": "analytics-test-admin-key"},
+            json={"enabled": False, "times": ["06:00", "18:00"]},
+        )
         self.assertEqual(resp_post.status_code, 200)
         updated = resp_post.json()
         self.assertFalse(updated["enabled"])

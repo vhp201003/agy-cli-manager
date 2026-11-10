@@ -248,6 +248,11 @@ def default_live_dir() -> Path:
     return Path.home() / ".gemini"
 
 
+# Captured before any test can patch default_live_dir, so ownership checks keep
+# pointing at the machine-wide profile even when a test redirects it.
+_MACHINE_LIVE_DIR = default_live_dir()
+
+
 def build_paths(root: Path) -> ManagerPaths:
     return ManagerPaths(
         root=root,
@@ -666,6 +671,12 @@ def save_client_config(data: dict, root: Path | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(".tmp")
     temp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    if hasattr(os, "chmod"):
+        # The file can hold the gateway admin key.
+        try:
+            os.chmod(temp_path, 0o600)
+        except OSError:
+            pass
     temp_path.replace(path)
 
 
@@ -721,10 +732,49 @@ def install_client_ca(paths: ManagerPaths | None, ca_pem: bytes) -> tuple[Path, 
     return bundle_path, installed_ok
 
 
+def server_config_path(root: Path | None = None) -> Path:
+    return (root or default_root()) / "server.json"
+
+
+def rotate_server_admin_key(paths: ManagerPaths | None = None) -> str:
+    import secrets
+    new_key = secrets.token_hex(32)
+    root = paths.root if paths else default_root()
+    s_path = server_config_path(root)
+    s_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"admin_key": new_key, "updated_at": datetime.now(timezone.utc).isoformat()}
+    temp_path = s_path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    if hasattr(os, "chmod"):
+        try:
+            os.chmod(temp_path, 0o600)
+        except OSError:
+            pass
+    temp_path.replace(s_path)
+    return new_key
+
+
+def load_server_admin_key(paths: ManagerPaths | None = None) -> str:
+    env_key = os.environ.get("AGY_ADMIN_KEY", "").strip()
+    if env_key:
+        return env_key
+    root = paths.root if paths else default_root()
+    s_path = server_config_path(root)
+    if s_path.is_file():
+        try:
+            data = json.loads(s_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and str(data.get("admin_key") or "").strip():
+                return str(data["admin_key"]).strip()
+        except Exception:
+            pass
+    return rotate_server_admin_key(paths)
+
+
 def connect_gateway(
     gateway_url: str,
     paths: ManagerPaths | None = None,
     timeout_seconds: float = 5.0,
+    admin_key: str | None = None,
 ) -> dict:
     raw = gateway_url.strip().rstrip("/")
     if "://" not in raw:
@@ -756,6 +806,9 @@ def connect_gateway(
     except Exception:
         pass
 
+    root = paths.root if paths else None
+    existing_cfg = load_client_config(root)
+
     config = {
         "gateway_url": base_url,
         "proxy_host": host,
@@ -767,8 +820,10 @@ def connect_gateway(
     }
     if ca_path:
         config["ca_bundle"] = ca_path
+    resolved_key = (admin_key if admin_key is not None else existing_cfg.get("admin_key") or "").strip()
+    if resolved_key:
+        config["admin_key"] = resolved_key
 
-    root = paths.root if paths else None
     save_client_config(config, root)
     return config
 
@@ -2644,6 +2699,520 @@ def import_current(paths: ManagerPaths, name: str, source_dir: Path | None = Non
     add_account(paths, name, live_dir)
 
 
+SAFE_ACCOUNT_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+
+def validate_account_name(name: str) -> str:
+    cleaned = str(name or "").strip()
+    if not cleaned or len(cleaned) > 64 or cleaned in {".", ".."} or not SAFE_ACCOUNT_NAME_RE.match(cleaned):
+        raise ValueError(
+            f"Invalid account name: '{name}'. Name must be 1-64 characters matching ^[a-zA-Z0-9._-]+$."
+        )
+    return cleaned
+
+
+def delete_account(paths: ManagerPaths, name: str) -> dict:
+    name = validate_account_name(name)
+    ensure_layout(paths)
+    with manager_lock(paths):
+        state = sync_state_from_disk(paths, load_state(paths))
+        acc_path = account_dir(paths, name)
+        if name not in state["accounts"] and not acc_path.exists():
+            raise ValueError(f"Account not found: {name}")
+
+        was_active = state.get("active") == name
+        promoted_to: str | None = None
+        if was_active:
+            candidates = _eligible_switch_candidates(state, exclude=name)
+            target = _best_switch_candidate(paths, state, exclude=name) if candidates else None
+            if target:
+                try:
+                    _copy_active_runtime(paths, target)
+                    state["active"] = target
+                    promoted_to = target
+                except Exception:
+                    state["active"] = None
+            else:
+                state["active"] = None
+                if paths.runtime_dir.exists():
+                    _clear_directory(paths.runtime_dir)
+                # The deleted account's credential is still live in the shared
+                # profile; leaving it there keeps a removed account usable.
+                live_dir = get_live_dir(state)
+                if live_dir and live_dir.is_dir() and _owns_live_dir(paths, live_dir):
+                    _remove_managed_profile_files(live_dir)
+                    if os.name == "nt":
+                        delete_windows_credential_blob("gemini:antigravity")
+
+        if os.name == "nt":
+            delete_windows_credential_blob(f"agy-cli-manager:{name}")
+
+        if acc_path.exists():
+            shutil.rmtree(acc_path, ignore_errors=True)
+
+        state["accounts"].pop(name, None)
+
+        cfg_path = paths.root / "config.json"
+        if cfg_path.is_file():
+            try:
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                pools = cfg.get("model_pools")
+                if isinstance(pools, dict):
+                    changed = False
+                    for pat in list(pools.keys()):
+                        accs = pools[pat]
+                        if isinstance(accs, list) and name in accs:
+                            new_accs = [a for a in accs if a != name]
+                            changed = True
+                            if new_accs:
+                                pools[pat] = new_accs
+                            else:
+                                pools.pop(pat, None)
+                    if changed:
+                        save_client_config(cfg, paths.root)
+            except Exception:
+                pass
+
+        state = sync_state_from_disk(paths, state)
+        if promoted_to:
+            _sync_runtime_to_live_dir(paths, state)
+        save_state(paths, state)
+        return {
+            "deleted": name,
+            "was_active": was_active,
+            "active": state.get("active"),
+            "promoted_to": promoted_to,
+        }
+
+
+def export_account_payload(
+    paths: ManagerPaths | None = None,
+    source_dir: Path | None = None,
+    name: str | None = None,
+) -> dict:
+    allow_system_wcm = False
+    if source_dir is not None:
+        resolved_src = Path(source_dir).expanduser().resolve()
+        if not resolved_src.exists() or not resolved_src.is_dir():
+            raise ValueError(f"Source directory does not exist: {source_dir}")
+        profile_source = _resolve_profile_source(resolved_src)
+        if resolved_src in {default_live_dir().resolve(), Path.home().resolve()}:
+            allow_system_wcm = True
+    elif name is not None and paths is not None:
+        acc_dir = account_dir(paths, validate_account_name(name))
+        if not acc_dir.exists() or not acc_dir.is_dir():
+            raise ValueError(f"Account directory does not exist: {acc_dir}")
+        profile_source = _resolve_profile_source(acc_dir)
+        allow_system_wcm = paths.root.resolve() == default_root().resolve()
+    else:
+        live = default_live_dir()
+        profile_source = _resolve_profile_source(live)
+        allow_system_wcm = True
+
+    candidate_files = (
+        profile_source / "antigravity-cli" / "antigravity-oauth-token",
+        profile_source / "antigravity-oauth-token",
+        profile_source / "antigravity-cli" / "credential.json",
+        profile_source / "credential.json",
+        profile_source / "oauth_creds.json",
+    )
+
+    raw_blob: dict | None = None
+    source_label = "file"
+    for candidate in candidate_files:
+        loaded = _read_json_if_exists(candidate)
+        if isinstance(loaded, dict):
+            tok = loaded.get("token") if isinstance(loaded.get("token"), dict) else loaded
+            if isinstance(tok, dict) and str(tok.get("access_token") or "").strip():
+                raw_blob = loaded
+                source_label = candidate.name
+                break
+
+    marker_candidates = (
+        profile_source / "antigravity-cli" / "agy-cli-manager-credential",
+        profile_source / "agy-cli-manager-credential",
+    )
+    has_marker = any(m.is_file() for m in marker_candidates)
+
+    if raw_blob is None and os.name == "nt" and (allow_system_wcm or has_marker):
+        targets: list[str] = []
+        for m in marker_candidates:
+            marker_txt = _read_text_if_exists(m)
+            if marker_txt:
+                targets.append(marker_txt.strip())
+        if name:
+            targets.append(f"agy-cli-manager:{name}")
+        targets.append("gemini:antigravity")
+        for target in targets:
+            blob = read_windows_credential_blob(target)
+            if isinstance(blob, dict):
+                tok = blob.get("token") if isinstance(blob.get("token"), dict) else blob
+                if isinstance(tok, dict) and str(tok.get("access_token") or "").strip():
+                    raw_blob = blob
+                    source_label = f"wcm:{target}"
+                    break
+
+    if not isinstance(raw_blob, dict):
+        raise ValueError(f"Profile source is missing required Antigravity OAuth token files: {profile_source}")
+
+    tok_dict = raw_blob.get("token") if isinstance(raw_blob.get("token"), dict) else raw_blob
+    access_token = str(tok_dict.get("access_token") or "").strip()
+    if not access_token:
+        raise ValueError(f"Antigravity access_token is empty or invalid in {profile_source}")
+
+    refresh_token = str(tok_dict.get("refresh_token") or "").strip() or None
+    expiry_timestamp = tok_dict.get("expiry_timestamp")
+    expiry = tok_dict.get("expiry")
+    if expiry_timestamp is None and isinstance(expiry, str) and expiry.strip():
+        parsed_exp = parse_timestamp(expiry.strip().replace("Z", "+00:00"))
+        if parsed_exp is not None:
+            expiry_timestamp = parsed_exp.timestamp()
+
+    identity = detect_profile_identity(profile_source)
+    if not identity.get("account_name"):
+        tok_identity = _identity_from_antigravity_token(raw_blob)
+        if tok_identity:
+            identity = tok_identity
+    email = (
+        identity.get("email")
+        or raw_blob.get("email")
+        or tok_dict.get("email")
+        or (identity.get("account_name") if isinstance(identity.get("account_name"), str) and "@" in identity.get("account_name", "") else None)
+    )
+    display_name = identity.get("display_name") or raw_blob.get("name") or tok_dict.get("name")
+    account_name = identity.get("account_name") or email
+
+    extra_files: dict[str, dict] = {}
+    for cred_candidate in (
+        profile_source / "antigravity-cli" / "credential.json",
+        profile_source / "credential.json",
+    ):
+        cred_data = _read_json_if_exists(cred_candidate)
+        if isinstance(cred_data, dict):
+            extra_files["credential.json"] = cred_data
+            break
+
+    return {
+        "format_version": "1.0",
+        "exported_at": utc_now().isoformat(),
+        "identity": {
+            "email": email,
+            "display_name": display_name,
+            "account_name": account_name,
+            "source": identity.get("source") if identity.get("source") and identity.get("source") != "unavailable" else source_label,
+        },
+        "token_data": {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expiry_timestamp": float(expiry_timestamp) if isinstance(expiry_timestamp, (int, float)) else None,
+            "expiry": expiry,
+            "token_type": tok_dict.get("token_type", "Bearer"),
+        },
+        "raw_blob": raw_blob,
+        "extra_files": extra_files,
+    }
+
+
+def import_account_payload(
+    paths: ManagerPaths,
+    name: str,
+    payload: dict,
+    overwrite: bool = False,
+    set_active: bool = False,
+) -> dict:
+    name = validate_account_name(name)
+    if not isinstance(payload, dict):
+        raise ValueError("Account payload must be a JSON object.")
+
+    token_data = payload.get("token_data")
+    if not isinstance(token_data, dict):
+        raw = payload.get("raw_blob") or payload
+        token_data = raw.get("token") if isinstance(raw, dict) and isinstance(raw.get("token"), dict) else raw
+    if not isinstance(token_data, dict):
+        raise ValueError("Account payload is missing 'token_data'.")
+
+    access_token = str(token_data.get("access_token") or "").strip()
+    if not access_token:
+        raise ValueError("Account payload is missing required 'access_token'.")
+
+    refresh_token = str(token_data.get("refresh_token") or "").strip() or None
+    expiry_timestamp = token_data.get("expiry_timestamp")
+    expiry = token_data.get("expiry")
+    if expiry_timestamp is None and isinstance(expiry, str) and expiry.strip():
+        parsed_exp = parse_timestamp(expiry.strip().replace("Z", "+00:00"))
+        if parsed_exp is not None:
+            expiry_timestamp = parsed_exp.timestamp()
+
+    ensure_layout(paths)
+    target = account_dir(paths, name)
+    if target.exists() and not overwrite:
+        raise ValueError(f"Account already exists: {name}")
+
+    identity_in = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+    raw_blob = dict(payload["raw_blob"]) if isinstance(payload.get("raw_blob"), dict) else {}
+    tok_obj = dict(raw_blob["token"]) if isinstance(raw_blob.get("token"), dict) else {}
+    tok_obj["access_token"] = access_token
+    if refresh_token is not None:
+        tok_obj["refresh_token"] = refresh_token
+    if expiry_timestamp is not None:
+        tok_obj["expiry_timestamp"] = float(expiry_timestamp)
+    if expiry is not None:
+        tok_obj["expiry"] = expiry
+    tok_obj.setdefault("token_type", token_data.get("token_type", "Bearer"))
+    raw_blob["token"] = tok_obj
+
+    if identity_in.get("email"):
+        raw_blob.setdefault("email", identity_in["email"])
+        tok_obj.setdefault("email", identity_in["email"])
+    if identity_in.get("display_name"):
+        raw_blob.setdefault("name", identity_in["display_name"])
+
+    if target.exists():
+        _clear_directory(target)
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+
+    cli_dir = target / ".gemini" / "antigravity-cli"
+    cli_dir.mkdir(parents=True, exist_ok=True)
+
+    oauth_file = cli_dir / "antigravity-oauth-token"
+    cred_file = cli_dir / "credential.json"
+    serialized = json.dumps(raw_blob, indent=2, sort_keys=True)
+    oauth_file.write_text(serialized, encoding="utf-8")
+    cred_file.write_text(serialized, encoding="utf-8")
+    if hasattr(os, "chmod"):
+        for fpath in (oauth_file, cred_file):
+            try:
+                os.chmod(fpath, 0o600)
+            except OSError:
+                pass
+
+    if os.name == "nt" and paths.root.resolve() == default_root().resolve():
+        write_windows_credential_blob(f"agy-cli-manager:{name}", raw_blob)
+        marker_file = cli_dir / "agy-cli-manager-credential"
+        marker_file.write_text(f"agy-cli-manager:{name}\n", encoding="utf-8")
+
+    detected_identity = detect_profile_identity(target)
+    if not detected_identity.get("account_name") and (identity_in.get("email") or identity_in.get("account_name")):
+        detected_identity = {
+            "account_name": identity_in.get("account_name") or identity_in.get("email"),
+            "email": identity_in.get("email"),
+            "display_name": identity_in.get("display_name"),
+            "source": identity_in.get("source") or "client-push",
+        }
+
+    with manager_lock(paths):
+        state = sync_state_from_disk(paths, load_state(paths))
+        previous_meta = state["accounts"].get(name, {})
+        state["accounts"][name] = {
+            "enabled": previous_meta.get("enabled", True),
+            "status": previous_meta.get("status", "standby"),
+            "last_error": None if overwrite else previous_meta.get("last_error"),
+            "cooldown_until": None if overwrite else previous_meta.get("cooldown_until"),
+            "fail_count": 0 if overwrite else previous_meta.get("fail_count", 0),
+            "refresh_fail_count": 0 if overwrite else previous_meta.get("refresh_fail_count", 0),
+            "created_at": previous_meta.get("created_at") or utc_now().isoformat(),
+            "usage_families": _normalize_usage_families(previous_meta),
+            "usage_windows": _normalize_usage_windows(previous_meta),
+            "usage_status": previous_meta.get("usage_status", "unknown"),
+            "usage_value": previous_meta.get("usage_value"),
+            "reset_at": previous_meta.get("reset_at"),
+            "health_status": previous_meta.get("health_status", "unknown"),
+            "last_live_check_at": previous_meta.get("last_live_check_at"),
+            "last_live_check_error": previous_meta.get("last_live_check_error"),
+            "next_live_check_at": previous_meta.get("next_live_check_at"),
+            "refresh_policy_seconds": int(
+                previous_meta.get("refresh_policy_seconds", DEFAULT_REFRESH_POLICY_SECONDS)
+                or DEFAULT_REFRESH_POLICY_SECONDS
+            ),
+            "identity": detected_identity,
+            "proxy": _normalize_proxy_config(previous_meta.get("proxy")),
+            "family_cooldowns": dict(previous_meta.get("family_cooldowns", {}))
+            if isinstance(previous_meta.get("family_cooldowns"), dict)
+            else {},
+        }
+        _sync_legacy_usage_fields(state["accounts"][name])
+        should_activate = set_active or not state.get("active") or (overwrite and state.get("active") == name)
+        if should_activate:
+            _copy_active_runtime(paths, name)
+            state["active"] = name
+            state = sync_state_from_disk(paths, state)
+            _sync_runtime_to_live_dir(paths, state)
+        save_state(paths, state)
+        return dict(state["accounts"][name])
+
+
+def _resolve_gateway_and_admin_key(
+    paths: ManagerPaths | None = None,
+    gateway_url: str | None = None,
+    admin_key: str | None = None,
+) -> tuple[str, str]:
+    root = paths.root if paths else default_root()
+    cfg = load_client_config(root)
+    raw_url = (gateway_url or os.environ.get("AGY_GATEWAY_URL") or cfg.get("gateway_url") or "http://127.0.0.1:8800").strip().rstrip("/")
+    if "://" not in raw_url:
+        raw_url = f"http://{raw_url}"
+    parsed = urllib.parse.urlparse(raw_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 8800
+    scheme = parsed.scheme or "http"
+    base_url = f"{scheme}://{host}:{port}"
+
+    key = (admin_key or os.environ.get("AGY_ADMIN_KEY") or cfg.get("admin_key") or "").strip()
+    if not key and host in {"127.0.0.1", "localhost"}:
+        s_path = server_config_path(root)
+        if s_path.is_file():
+            try:
+                s_data = json.loads(s_path.read_text(encoding="utf-8"))
+                key = str(s_data.get("admin_key") or "").strip()
+            except Exception:
+                pass
+    if not key:
+        raise ValueError(
+            "Admin API key is required for gateway account management. "
+            "Pass --admin-key, set AGY_ADMIN_KEY, or run 'agy-client connect <url> --admin-key <key>'."
+        )
+    return base_url, key
+
+
+def _gateway_admin_request(
+    method: str,
+    url: str,
+    admin_key: str,
+    body: dict | None = None,
+    timeout_seconds: float = 15.0,
+) -> dict:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {
+        "User-Agent": "agy-client",
+        "X-Admin-Key": admin_key,
+        "Accept": "application/json",
+    }
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as exc:
+        err_body = ""
+        try:
+            err_body = exc.read().decode("utf-8")
+            err_json = json.loads(err_body)
+            detail = err_json.get("detail") or err_json.get("error") or err_body
+        except Exception:
+            detail = err_body or str(exc)
+        raise ValueError(f"Gateway returned HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        raise ValueError(f"Failed to communicate with gateway at {url}: {exc}") from exc
+
+
+def push_account_to_gateway(
+    paths: ManagerPaths,
+    name: str | None = None,
+    source_dir: Path | None = None,
+    *,
+    payload: dict | None = None,
+    overwrite: bool = False,
+    set_active: bool = False,
+    gateway_url: str | None = None,
+    admin_key: str | None = None,
+    timeout_seconds: float = 15.0,
+) -> dict:
+    base_url, key = _resolve_gateway_and_admin_key(paths, gateway_url, admin_key)
+    if payload is None:
+        payload = export_account_payload(paths, source_dir=source_dir)
+    if name and str(name).strip():
+        resolved_name = validate_account_name(name)
+    else:
+        identity = payload.get("identity") or {}
+        email = identity.get("email") or identity.get("account_name") or ""
+        if email:
+            local_part = email.split("@")[0] if "@" in email else email
+            sanitized = re.sub(r"[^a-zA-Z0-9._-]", "_", local_part).strip("._-")
+            resolved_name = validate_account_name(sanitized or "account")
+        else:
+            resolved_name = "client-account"
+
+    req_body = {
+        "name": resolved_name,
+        "payload": payload,
+        "overwrite": bool(overwrite),
+        "set_active": bool(set_active),
+    }
+    return _gateway_admin_request(
+        "POST",
+        f"{base_url}/api/admin/accounts/push",
+        key,
+        body=req_body,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def list_gateway_accounts(
+    paths: ManagerPaths,
+    *,
+    gateway_url: str | None = None,
+    admin_key: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> dict:
+    base_url, key = _resolve_gateway_and_admin_key(paths, gateway_url, admin_key)
+    return _gateway_admin_request(
+        "GET",
+        f"{base_url}/api/admin/accounts",
+        key,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def delete_gateway_account(
+    paths: ManagerPaths,
+    name: str,
+    *,
+    gateway_url: str | None = None,
+    admin_key: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> dict:
+    name = validate_account_name(name)
+    base_url, key = _resolve_gateway_and_admin_key(paths, gateway_url, admin_key)
+    return _gateway_admin_request(
+        "DELETE",
+        f"{base_url}/api/admin/accounts/{urllib.parse.quote(name)}",
+        key,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def update_gateway_account(
+    paths: ManagerPaths,
+    name: str,
+    *,
+    enabled: bool | None = None,
+    proxy_url: str | None = None,
+    label: str | None = None,
+    gateway_url: str | None = None,
+    admin_key: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> dict:
+    name = validate_account_name(name)
+    base_url, key = _resolve_gateway_and_admin_key(paths, gateway_url, admin_key)
+    body: dict = {}
+    if enabled is not None:
+        body["enabled"] = bool(enabled)
+    if proxy_url is not None:
+        body["proxy_url"] = proxy_url
+    if label is not None:
+        body["label"] = label
+    return _gateway_admin_request(
+        "PATCH",
+        f"{base_url}/api/admin/accounts/{urllib.parse.quote(name)}",
+        key,
+        body=body,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def _sync_windows_credential_for_switch(paths: ManagerPaths, name: str) -> bool:
     if os.name != "nt" or paths.root != default_root():
         return False
@@ -2676,9 +3245,30 @@ def _copy_active_runtime(paths: ManagerPaths, name: str) -> None:
     _copy_account_profile(src, paths.runtime_dir)
 
 
+def _owns_live_dir(paths: ManagerPaths, live_dir: Path | None) -> bool:
+    """A manager instance may only write to the live profile it owns.
+
+    The default installation owns the shared default profile; a sandboxed root
+    may use its own profile but must not hijack the global one.
+    """
+    if live_dir is None:
+        return False
+    try:
+        live_resolved = live_dir.resolve()
+        root_resolved = paths.root.resolve()
+        machine_live = _MACHINE_LIVE_DIR.resolve()
+    except OSError:
+        return False
+    if root_resolved == default_root().resolve():
+        return True
+    return live_resolved != machine_live
+
+
 def _sync_runtime_to_live_dir(paths: ManagerPaths, state: dict) -> None:
     live_dir = get_live_dir(state)
     if live_dir is None:
+        return
+    if not _owns_live_dir(paths, live_dir):
         return
     _copy_account_profile(paths.runtime_dir, live_dir.parent)
     if os.name == "nt":
