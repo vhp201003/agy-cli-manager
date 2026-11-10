@@ -26,6 +26,7 @@ CATALOG = {
 @pytest.fixture
 def live_catalog(monkeypatch):
     monkeypatch.setattr(fastapi_app.tm_instance, "get_model_catalog", lambda force=False: dict(CATALOG))
+    monkeypatch.setattr(fastapi_app.tm_instance, "declared_models", lambda: ["gemini-4-argon"])
     return CATALOG
 
 
@@ -39,7 +40,7 @@ def test_v1_models_catalog(live_catalog):
     from starlette.testclient import TestClient
 
     data = TestClient(fastapi_app.app).get("/v1/models").json()["data"]
-    assert {m["id"] for m in data} == set(CATALOG)
+    assert {m["id"] for m in data} == set(CATALOG) | {"gemini-4-argon"}
     owners = {m["id"]: m["owned_by"] for m in data}
     assert owners["claude-sonnet-4-6"] == "anthropic"
     assert owners["gpt-oss-120b-medium"] == "openai"
@@ -50,6 +51,7 @@ def test_v1_models_falls_back_when_catalog_unavailable(monkeypatch):
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(fastapi_app.tm_instance, "get_model_catalog", lambda force=False: {})
+    monkeypatch.setattr(fastapi_app.tm_instance, "declared_models", lambda: [])
     ids = {m["id"] for m in TestClient(fastapi_app.app).get("/v1/models").json()["data"]}
     assert ids == {"gemini-2.5-flash", "gemini-2.5-flash-lite"}
 
@@ -63,9 +65,16 @@ def test_resolve_accepts_catalog_ids(live_catalog):
     assert resolve_model_name("gemini-2.5-flash-latest") == "gemini-2.5-flash"
 
 
+def test_resolve_accepts_operator_declared_pool_models(live_catalog):
+    # An explicit model_pools entry declares the model served by a chosen account set.
+    assert resolve_model_name("gemini-4-argon") == "gemini-4-argon"
+    assert resolve_model_name("gemini-4-argon-low") == "gemini-4-argon"
+    assert resolve_model_name("gemini-4-argon-high") == "gemini-4-argon"
+
+
 def test_resolve_rejects_ids_outside_catalog(live_catalog):
-    # Names that are not advertised upstream are rejected; never swapped for another model.
-    for bad in ("gemini-4-argon", "gemini-4-argon-low", "gemini-3.8-flash",
+    # Names that are neither advertised nor declared are rejected; never swapped.
+    for bad in ("gemini-3.8-flash", "gemini-4-argon-tiered",
                 "claude-opus-4-6", "claude-sonnet-5-5", "unknown-agent-model", None, ""):
         try:
             resolve_model_name(bad)
@@ -266,7 +275,7 @@ def test_unsupported_model_returns_400_without_token_call(live_catalog):
     with patch("agy_cli_manager.proxy.token_manager.TokenManager.get_token_by_session") as tok:
         resp = client.post(
             "/v1/chat/completions",
-            json={"model": "gemini-4-argon", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "hi"}]},
         )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "unsupported_model"

@@ -611,6 +611,28 @@ class TokenManager:
             else:
                 return (3, None)
 
+    def declared_models(self) -> list[str]:
+        """Models an operator explicitly routed via model_pools.
+
+        A pool entry is a deliberate statement that the model is served by a
+        specific account set, so it stays usable even when no account currently
+        advertises it (upstream answers honestly, usually 404).
+        """
+        with self._lock:
+            return list(self._model_pools)
+
+    def quarantine_for_tos(self, account_name: str, body: bytes | str = b"") -> bool:
+        """Quarantine an account when upstream reports a Terms-of-Service block.
+
+        A ToS violation is account-level and permanent; retrying every 30 minutes
+        just burns requests, so the account is parked for a long window.
+        """
+        blob = body.decode("utf-8", "ignore") if isinstance(body, bytes) else str(body)
+        if "TOS_VIOLATION" in blob or "violation of Terms of Service" in blob:
+            self.quarantine_account(account_name, reason="tos_violation", duration_seconds=30 * 86400)
+            return True
+        return False
+
     def get_model_catalog(self, force: bool = False) -> dict[str, dict]:
         """Return the union of upstream-advertised models across loaded accounts.
 

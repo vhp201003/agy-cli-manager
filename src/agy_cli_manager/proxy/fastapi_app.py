@@ -753,7 +753,13 @@ def _live_model_ids() -> set[str]:
 def _model_owners() -> dict[str, str]:
     catalog = tm_instance.get_model_catalog() if tm_instance else {}
     if not catalog:
-        return dict(_FALLBACK_MODEL_OWNERS)
+        owners = dict(_FALLBACK_MODEL_OWNERS)
+        try:
+            for mid in tm_instance.declared_models():
+                owners.setdefault(mid, "google")
+        except Exception:
+            pass
+        return owners
     owners: dict[str, str] = {}
     for mid, info in catalog.items():
         provider = str((info or {}).get("apiProvider", ""))
@@ -763,6 +769,11 @@ def _model_owners() -> dict[str, str]:
             owners[mid] = "openai"
         else:
             owners[mid] = "google"
+    try:
+        for mid in tm_instance.declared_models():
+            owners.setdefault(mid, "google")
+    except Exception:
+        pass
     return owners
 
 
@@ -784,8 +795,12 @@ def resolve_model_name(requested: str | None) -> str:
     if stripped != target:
         candidates.append(stripped)
     known = _live_model_ids() or set(_FALLBACK_MODEL_OWNERS)
+    try:
+        declared = set(tm_instance.declared_models())
+    except Exception:
+        declared = set()
     for cand in candidates:
-        if cand in known:
+        if cand in known or cand in declared:
             return cand
     raise UnsupportedModelError(requested)
 
@@ -945,7 +960,9 @@ async def chat_completions(request: Request):
                             await resp.aclose()
                             continue
                     if resp.status_code == 403:
-                        tm_instance.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
+                        body_probe = await resp.aread()
+                        if not tm_instance.quarantine_for_tos(acc_name, body_probe):
+                            tm_instance.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
                         if attempt < max_attempts - 1:
                             await resp.aclose()
                             continue
@@ -1076,7 +1093,9 @@ async def chat_completions(request: Request):
                 if attempt < max_attempts - 1:
                     continue
             if resp.status_code == 403:
-                tm_instance.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
+                body_probe = await resp.aread()
+                if not tm_instance.quarantine_for_tos(acc_name, body_probe):
+                    tm_instance.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
                 if attempt < max_attempts - 1:
                     continue
             return JSONResponse(last_error_resp, status_code=last_status_code)
