@@ -728,45 +728,60 @@ async def stream_logs(request: Request):
     return EventSourceResponse(event_generator())
 
 
-_SUPPORTED_MODELS = [
-    {"id": "gemini-3.8-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-4-argon", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "claude-sonnet-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-opus-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-sonnet-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "claude-opus-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "gemini-2.5-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-2.5-pro", "object": "model", "created": 1700000000, "owned_by": "google"},
-]
-
-_MODEL_MAP = {
-    "gemini-3.8-flash": "gemini-3.8-flash",
-    "gemini-4-argon": "gemini-4-argon",
-    "claude-sonnet-4-6": "claude-sonnet-4-6",
-    "claude-opus-4-6": "claude-sonnet-4-6",
-    "claude-sonnet-5-5": "claude-sonnet-4-6",
-    "claude-opus-5-5": "claude-sonnet-4-6",
-    "gemini-1.5-pro-latest": "gemini-3.8-flash",
-    "gemini-1.5-pro": "gemini-3.8-flash",
-    "gemini-1.5-flash-latest": "gemini-3.8-flash",
-    "gemini-1.5-flash": "gemini-3.8-flash",
-    "gemini-2.5-flash": "gemini-3.8-flash",
-    "gemini-2.5-pro": "gemini-4-argon",
-    "claude-3-5-sonnet": "claude-sonnet-4-6",
-}
-
 _EFFORT_SUFFIX_RE = re.compile(r"-(low|medium|high|max)$", re.IGNORECASE)
 
+# Only identifiers verified against the live upstream (daily-cloudcode-pa) 2026-11-10.
+# Any other name is 404 NOT_FOUND upstream, so it is not advertised and not accepted.
+_SUPPORTED_MODEL_OWNERS = {
+    "gemini-2.5-flash": "google",
+    "gemini-2.5-flash-lite": "google",
+    "gemini-2.5-pro": "google",
+    "claude-sonnet-4-6": "anthropic",
+}
+_REAL_MODELS = tuple(_SUPPORTED_MODEL_OWNERS)
+_SUPPORTED_MODELS = [
+    {"id": mid, "object": "model", "created": 1700000000, "owned_by": owner}
+    for mid, owner in _SUPPORTED_MODEL_OWNERS.items()
+]
+
+
+class UnsupportedModelError(ValueError):
+    """Raised when a requested model is not a verified upstream identifier."""
+
+
 def resolve_model_name(requested: str | None) -> str:
-    target = (requested or "gemini-2.5-flash").replace("-latest", "").strip()
-    match = _EFFORT_SUFFIX_RE.search(target)
-    if match:
-        target = _EFFORT_SUFFIX_RE.sub("", target)
-    m = _MODEL_MAP.get(target, target)
-    valid_prefixes = ("gemini", "claude", "gpt")
-    if not any(m.lower().startswith(p) for p in valid_prefixes):
-        return "gemini-2.5-flash"
-    return m
+    """Return the canonical upstream id, or raise for anything unverified.
+
+    Only a trailing effort suffix and the legacy ``-latest`` marker are
+    canonicalized; neither ever makes an unknown model valid. No silent
+    fallback: an unsupported name is rejected, never swapped for Flash.
+    """
+    target = (requested or "").replace("-latest", "").strip()
+    target = _EFFORT_SUFFIX_RE.sub("", target)
+    if target in _REAL_MODELS:
+        return target
+    raise UnsupportedModelError(requested)
+
+
+@app.get("/v1/models")
+async def list_models():
+    return {"object": "list", "data": _SUPPORTED_MODELS}
+
+
+@app.get("/v1/models/{model_id}")
+async def get_model(model_id: str):
+    for m in _SUPPORTED_MODELS:
+        if m["id"] == model_id:
+            return m
+    return JSONResponse(
+        {"error": {"message": f"Model '{model_id}' not found", "type": "invalid_request_error"}},
+        status_code=404,
+    )
+
+
+_CLOUDCODE_HOST = "daily-cloudcode-pa.googleapis.com"
+_CLOUDCODE_PROJECT = "aicode-consumers"
+
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
@@ -775,8 +790,19 @@ async def chat_completions(request: Request):
     except Exception:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         
-    requested_model = body.get("model") or "gemini-2.5-flash"
-    upstream_model = resolve_model_name(requested_model)
+    requested_model = body.get("model")
+    if not isinstance(requested_model, str) or not requested_model.strip():
+        return JSONResponse(
+            {"error": {"message": "A 'model' is required", "type": "invalid_request_error", "param": "model", "code": "missing_model"}},
+            status_code=400,
+        )
+    try:
+        upstream_model = resolve_model_name(requested_model)
+    except UnsupportedModelError:
+        return JSONResponse(
+            {"error": {"message": f"Unsupported model: {requested_model}", "type": "invalid_request_error", "param": "model", "code": "unsupported_model"}},
+            status_code=400,
+        )
     match_eff = _EFFORT_SUFFIX_RE.search(requested_model)
     suffix_effort = match_eff.group(1).lower() if match_eff else None
         

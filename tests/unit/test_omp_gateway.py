@@ -6,7 +6,7 @@ from agy_cli_manager.proxy.translators.openai import (
     convert_gemini_response_to_openai,
 )
 from agy_cli_manager.proxy.translators.streaming import stream_gemini_to_openai
-from agy_cli_manager.proxy.fastapi_app import _SUPPORTED_MODELS, resolve_model_name
+from agy_cli_manager.proxy.fastapi_app import _SUPPORTED_MODELS, resolve_model_name, UnsupportedModelError
 
 
 @pytest.fixture
@@ -15,18 +15,14 @@ def anyio_backend():
 
 
 def test_v1_models_catalog():
+    # Catalog must list exactly the identifiers verified against the live upstream.
     model_ids = {m["id"] for m in _SUPPORTED_MODELS}
-    expected = {
-        "claude-sonnet-4-6",
-        "claude-opus-4-6",
-        "claude-sonnet-5-5",
-        "claude-opus-5-5",
-        "gemini-3.8-flash",
-        "gemini-4-argon",
+    assert model_ids == {
         "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
         "gemini-2.5-pro",
+        "claude-sonnet-4-6",
     }
-    assert expected.issubset(model_ids)
 
 
 def test_v1_models_retrieve():
@@ -42,21 +38,34 @@ def test_v1_models_retrieve():
     assert resp_404.status_code == 404
 
 
-def test_model_preservation_for_claude_and_gpt():
-    assert resolve_model_name("claude-sonnet-4-6") == "claude-sonnet-4-6"
-    assert resolve_model_name("claude-opus-4-6") == "claude-sonnet-4-6"
-    assert resolve_model_name("claude-sonnet-5-5") == "claude-sonnet-4-6"
-    assert resolve_model_name("claude-opus-5-5") == "claude-sonnet-4-6"
-    assert resolve_model_name("gemini-3.8-flash") == "gemini-2.5-flash"
-    assert resolve_model_name("gemini-4-argon") == "gemini-2.5-pro"
+def test_resolve_canonicalizes_supported_only():
+    # Real ids resolve to themselves (effort suffix and -latest are canonicalized).
     assert resolve_model_name("gemini-2.5-flash") == "gemini-2.5-flash"
+    assert resolve_model_name("gemini-2.5-flash-lite") == "gemini-2.5-flash-lite"
     assert resolve_model_name("gemini-2.5-pro") == "gemini-2.5-pro"
-    assert resolve_model_name("gemini-3.8-flash-high") == "gemini-2.5-flash"
-    assert resolve_model_name("gemini-3.8-flash-medium") == "gemini-2.5-flash"
-    assert resolve_model_name("gemini-3.8-flash-low") == "gemini-2.5-flash"
-    assert resolve_model_name("unknown-agent-model") == "gemini-2.5-flash"
-    assert resolve_model_name(None) == "gemini-2.5-flash"
-    assert resolve_model_name("") == "gemini-2.5-flash"
+    assert resolve_model_name("claude-sonnet-4-6") == "claude-sonnet-4-6"
+    assert resolve_model_name("gemini-2.5-flash-high") == "gemini-2.5-flash"
+    assert resolve_model_name("gemini-2.5-flash-latest") == "gemini-2.5-flash"
+
+
+def test_resolve_rejects_unsupported_without_fallback():
+    # Fictional and unknown names must raise; never silently swap to Flash.
+    for bad in (
+        "gemini-3.8-flash",
+        "gemini-4-argon",
+        "claude-opus-4-6",
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "gpt-oss-120b",
+        "unknown-agent-model",
+        None,
+        "",
+    ):
+        try:
+            resolve_model_name(bad)
+        except UnsupportedModelError:
+            continue
+        raise AssertionError(f"expected UnsupportedModelError for {bad!r}")
 
 
 def test_tool_response_resolution_and_turn_merging():
@@ -211,13 +220,13 @@ def test_thinking_budget_mapping():
         return mock_resp
 
     with patch("httpx.AsyncClient.send", new=mock_send), patch("agy_cli_manager.proxy.token_manager.TokenManager.get_token_by_session", return_value=("test_acc", "fake_token")):
-        client.post("/v1/chat/completions", json={"model": "gemini-3.8-flash-low", "messages": [{"role": "user", "content": "hi"}]})
+        client.post("/v1/chat/completions", json={"model": "gemini-2.5-flash-low", "messages": [{"role": "user", "content": "hi"}]})
         assert captured_payloads[-1]["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 1024
 
-        client.post("/v1/chat/completions", json={"model": "gemini-3.8-flash", "reasoning_effort": "high", "messages": [{"role": "user", "content": "hi"}]})
+        client.post("/v1/chat/completions", json={"model": "gemini-2.5-flash", "reasoning_effort": "high", "messages": [{"role": "user", "content": "hi"}]})
         assert captured_payloads[-1]["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 24576
 
-        client.post("/v1/chat/completions", json={"model": "gemini-3.8-flash", "reasoning_effort": "none", "messages": [{"role": "user", "content": "hi"}]})
+        client.post("/v1/chat/completions", json={"model": "gemini-2.5-flash", "reasoning_effort": "none", "messages": [{"role": "user", "content": "hi"}]})
         assert captured_payloads[-1]["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0
 
 
@@ -242,3 +251,26 @@ def test_thought_signature_capture_and_injection():
     assert parts[1]["thoughtSignature"] == "skip_thought_signature_validator"
 
 
+def test_unsupported_model_returns_400_without_token_call():
+    from starlette.testclient import TestClient
+    from unittest.mock import patch
+    from agy_cli_manager.proxy.fastapi_app import app
+
+    client = TestClient(app)
+    with patch("agy_cli_manager.proxy.token_manager.TokenManager.get_token_by_session") as tok:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "gemini-4-argon", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unsupported_model"
+    tok.assert_not_called()
+
+    with patch("agy_cli_manager.proxy.token_manager.TokenManager.get_token_by_session") as tok:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "missing_model"
+    tok.assert_not_called()

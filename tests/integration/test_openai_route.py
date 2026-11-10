@@ -34,7 +34,7 @@ async def test_openai_route_sync():
         with patch("httpx.AsyncClient.send", autospec=True, side_effect=mock_send_side_effect):
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 resp = await client.post("/v1/chat/completions", json={
-                    "model": "gemini-1.5-flash",
+                    "model": "gemini-2.5-flash",
                     "messages": [{"role": "user", "content": "Hello"}],
                     "stream": False,
                 })
@@ -69,7 +69,7 @@ async def test_openai_route_stream():
         with patch("httpx.AsyncClient.send", autospec=True, side_effect=mock_send_side_effect):
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 async with client.stream("POST", "/v1/chat/completions", json={
-                    "model": "gemini-1.5-flash",
+                    "model": "gemini-2.5-flash",
                     "messages": [{"role": "user", "content": "Hello"}],
                     "stream": True,
                 }) as resp:
@@ -97,7 +97,7 @@ async def test_openai_route_error():
         with patch("httpx.AsyncClient.send", autospec=True, side_effect=mock_send_side_effect):
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 resp = await client.post("/v1/chat/completions", json={
-                    "model": "gemini-1.5-flash",
+                    "model": "gemini-2.5-flash",
                     "messages": [{"role": "user", "content": "Hello"}],
                     "stream": False,
                 })

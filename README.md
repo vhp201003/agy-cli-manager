@@ -193,7 +193,13 @@ curl http://127.0.0.1:8800/v1/chat/completions \
 Set your environment or agent custom model provider:
 - **Base URL:** `http://127.0.0.1:8800/v1` (or your VPS IP `http://<vps-ip>:8800/v1`)
 - **API Key:** `none` (any string)
-- **Models:** `gemini-2.5-flash`, `gemini-2.5-pro`, `claude-3-7-sonnet` (depends on account entitlement)
+- **Models (verified against the live upstream):** `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`, `claude-sonnet-4-6`
+
+The gateway advertises exactly these identifiers through `GET /v1/models`. A
+requested model outside this set returns HTTP 400 (`unsupported_model`) and is
+never silently swapped for another model. Select reasoning effort with the
+standard `reasoning_effort` field (or a trailing `-low|-medium|-high|max`
+suffix), not by inventing a model name.
 
 ---
 
