@@ -784,7 +784,7 @@ class TokenManager:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
-                "User-Agent": "antigravity",
+                "User-Agent": CODE_ASSIST_USER_AGENT,
             },
             method="POST",
         )
@@ -796,7 +796,11 @@ class TokenManager:
             logger.debug("fetchAvailableModels failed: %s", exc)
             return {}
         models = payload.get("models")
-        return models if isinstance(models, dict) else {}
+        if not isinstance(models, dict):
+            return {}
+        # Rows flagged disabled are listed but 404 on inference (e.g.
+        # gemini-4-argon-disabled on accounts without Argon access).
+        return {mid: info for mid, info in models.items() if not (isinstance(info, dict) and info.get("disabled") is True)}
 
     def get_token_by_session(self, session_key: str | None = None, model_name: str | None = None) -> tuple[str, str]:
         with self._lock:
@@ -1105,7 +1109,7 @@ class TokenManager:
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
-                    "User-Agent": "antigravity",
+                    "User-Agent": CODE_ASSIST_USER_AGENT,
                 },
                 method="POST",
             )

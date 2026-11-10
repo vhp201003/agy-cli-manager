@@ -165,3 +165,42 @@ def test_install_client_ca_creates_bundle(tmp_path: Path, monkeypatch):
     bundle, ok = install_client_ca(paths, b"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----")
     assert bundle.is_file()
     assert ok is True
+
+
+def _fake_roster_opener(captured: dict, models: dict):
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps({"models": models}).encode("utf-8")
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            captured["user_agent"] = req.get_header("User-agent")
+            return _Resp()
+
+    return _Opener()
+
+
+def test_fetch_available_models_sends_versioned_client_user_agent_and_skips_disabled():
+    # The backend gates newer SKUs (gemini-4-argon) on the client identity: a bare
+    # "antigravity" UA gets a truncated roster and 404s on those models.
+    from agy_cli_manager.manager import CODE_ASSIST_USER_AGENT
+
+    captured: dict = {}
+    roster = {
+        "gemini-4-argon-low": {"thinkingLevel": 1},
+        "gemini-4-argon-disabled": {"disabled": True},
+        "gemini-2.5-flash": {},
+    }
+    with patch(
+        "agy_cli_manager.proxy.token_manager.urllib.request.build_opener",
+        return_value=_fake_roster_opener(captured, roster),
+    ):
+        models = TokenManager._fetch_available_models("tok")
+    assert captured["user_agent"] == CODE_ASSIST_USER_AGENT
+    assert set(models) == {"gemini-4-argon-low", "gemini-2.5-flash"}

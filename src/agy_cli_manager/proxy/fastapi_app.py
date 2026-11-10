@@ -91,6 +91,7 @@ except ImportError:
 try:
     from agy_cli_manager.manager import (
         build_paths,
+        CODE_ASSIST_USER_AGENT,
         delete_account,
         import_account_payload,
         load_server_admin_key,
@@ -104,6 +105,7 @@ try:
 except ImportError:
     from ..manager import (
         build_paths,
+        CODE_ASSIST_USER_AGENT,
         delete_account,
         import_account_payload,
         load_server_admin_key,
@@ -981,7 +983,7 @@ async def chat_completions(request: Request):
                 headers = {
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
-                    "User-Agent": "antigravity",
+                    "User-Agent": CODE_ASSIST_USER_AGENT,
                 }
                 req = client.build_request("POST", url, json=cloudcode_payload, headers=headers)
                 t0 = time.time()
@@ -1132,7 +1134,7 @@ async def chat_completions(request: Request):
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
-            "User-Agent": "antigravity",
+            "User-Agent": CODE_ASSIST_USER_AGENT,
         }
         req = stream_client.build_request("POST", url, json=cloudcode_payload, headers=headers)
         try:
