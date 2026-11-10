@@ -574,10 +574,19 @@ class MITMProxyHandler(socketserver.BaseRequestHandler):
                 # 3. Handle 403 Forbidden (e.g. Account has no valid license) -> Quarantine and switch
                 if resp.status == 403:
                     err_preview = resp.read(512).decode("utf-8", "ignore")
-                    logger.warning(
-                        f"[403 Forbidden] Account '{acc_name}' forbidden on {path}: {err_preview[:100]}. Quarantining account..."
-                    )
-                    self.token_manager.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
+                    tos_blocked = self.token_manager.quarantine_for_tos(acc_name, err_preview)
+                    if tos_blocked:
+                        logger.error(
+                            "[403 ToS] Account '%s' is disabled by Google on %s: %s. Parking the account.",
+                            acc_name,
+                            path,
+                            err_preview[:160],
+                        )
+                    else:
+                        logger.warning(
+                            f"[403 Forbidden] Account '{acc_name}' forbidden on {path}: {err_preview[:100]}. Quarantining account..."
+                        )
+                        self.token_manager.quarantine_account(acc_name, reason="forbidden_403", duration_seconds=1800)
                     self.token_manager.mark_429(acc_name, cooldown_seconds=1800)
                     if attempt < max_attempts - 1:
                         broadcast_event({
