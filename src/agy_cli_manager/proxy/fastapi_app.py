@@ -729,27 +729,20 @@ async def stream_logs(request: Request):
 
 _SUPPORTED_MODELS = [
     {"id": "gemini-3.8-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-4-argon", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "claude-3-7-sonnet", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-sonnet-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-opus-4-6", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
+    {"id": "claude-sonnet-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
     {"id": "claude-opus-5-5", "object": "model", "created": 1700000000, "owned_by": "anthropic"},
-    {"id": "gpt-oss-120b", "object": "model", "created": 1700000000, "owned_by": "openai"},
-    {"id": "gemini-2.5-flash", "object": "model", "created": 1700000000, "owned_by": "google"},
-    {"id": "gemini-2.5-pro", "object": "model", "created": 1700000000, "owned_by": "google"},
+    {"id": "gemini-4-argon", "object": "model", "created": 1700000000, "owned_by": "google"},
 ]
 
 _MODEL_MAP = {
     "gemini-3.8-flash": "gemini-2.5-flash",
-    "gemini-4-argon": "gemini-2.5-pro",
-    "claude-3-7-sonnet": "claude-sonnet-4-6",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
+    "claude-opus-4-6": "claude-sonnet-4-6",
+    "claude-sonnet-5-5": "claude-sonnet-4-6",
     "claude-opus-5-5": "claude-sonnet-4-6",
-    "gemini-1.5-pro-latest": "gemini-2.5-flash",
-    "gemini-1.5-pro": "gemini-2.5-flash",
-    "gemini-1.5-flash-latest": "gemini-2.5-flash",
-    "gemini-1.5-flash": "gemini-2.5-flash",
-    "gemini-1.0-pro": "gemini-2.5-flash",
-    "gemini-pro": "gemini-2.5-flash",
-    "gemini-pro-latest": "gemini-2.5-flash",
-    "claude-3-5-sonnet": "claude-sonnet-4-6",
+    "gemini-4-argon": "gemini-2.5-pro",
 }
 
 _CLOUDCODE_HOST = "daily-cloudcode-pa.googleapis.com"
