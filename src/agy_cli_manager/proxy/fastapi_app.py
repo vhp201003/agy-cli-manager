@@ -740,19 +740,18 @@ _SUPPORTED_MODELS = [
 ]
 
 _MODEL_MAP = {
-    "gemini-3.8-flash": "gemini-2.5-flash",
-    "gemini-4-argon": "gemini-2.5-pro",
+    "gemini-3.8-flash": "gemini-3.8-flash",
+    "gemini-4-argon": "gemini-4-argon",
     "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-opus-4-6": "claude-sonnet-4-6",
     "claude-sonnet-5-5": "claude-sonnet-4-6",
     "claude-opus-5-5": "claude-sonnet-4-6",
-    "gemini-1.5-pro-latest": "gemini-2.5-flash",
-    "gemini-1.5-pro": "gemini-2.5-flash",
-    "gemini-1.5-flash-latest": "gemini-2.5-flash",
-    "gemini-1.5-flash": "gemini-2.5-flash",
-    "gemini-1.0-pro": "gemini-2.5-flash",
-    "gemini-pro": "gemini-2.5-flash",
-    "gemini-pro-latest": "gemini-2.5-flash",
+    "gemini-1.5-pro-latest": "gemini-3.8-flash",
+    "gemini-1.5-pro": "gemini-3.8-flash",
+    "gemini-1.5-flash-latest": "gemini-3.8-flash",
+    "gemini-1.5-flash": "gemini-3.8-flash",
+    "gemini-2.5-flash": "gemini-3.8-flash",
+    "gemini-2.5-pro": "gemini-4-argon",
     "claude-3-5-sonnet": "claude-sonnet-4-6",
 }
 
