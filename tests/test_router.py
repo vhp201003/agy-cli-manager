@@ -162,15 +162,25 @@ def test_pool_rule_matches_effort_suffixed_model_ids(tmp_path):
         name: {"name": name, "access_token": tok, "expires_at": now + 3600}
         for name, tok in (("acc1", "tok1"), ("acc2", "tok2"))
     }
-    tm.set_model_pools({"gemini-4-argon": ["acc2"]})
+    tm.set_model_pools({"gemini-4-argon": ["acc2"], "gemini-4-carbon": ["acc2"]})
 
-    for requested in ("gemini-4-argon", "gemini-4-argon-low", "gemini-4-argon-high", "gemini-4-argon-xhigh"):
+    for requested in (
+        "gemini-4-argon",
+        "gemini-4-argon-low",
+        "gemini-4-argon-high",
+        "gemini-4-argon-xhigh",
+        "gemini-4-carbon",
+        "gemini-4-carbon-low",
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-high",
+    ):
         acc, tok = tm.get_token_by_session(model_name=requested)
         assert (acc, tok) == ("acc2", "tok2"), requested
 
     # The routing key the gateway builds is "<requested>|<canonical>"; the
     # canonical half must match too, whichever order the parts arrive in.
     assert tm.resolve_pool_for_model("gemini-4-argon-high|gemini-4-argon")[0] == "gemini-4-argon"
+    assert tm.resolve_pool_for_model("gemini-4-carbon|gemini-4-carbon-low")[0] == "gemini-4-carbon"
 
 
 def test_model_pools_api_endpoints(monkeypatch, tmp_path):

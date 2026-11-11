@@ -195,6 +195,8 @@ def test_fetch_available_models_sends_versioned_client_user_agent_and_skips_disa
     roster = {
         "gemini-4-argon-low": {"thinkingLevel": 1},
         "gemini-4-argon-disabled": {"disabled": True},
+        "gemini-4-carbon-low": {"thinkingLevel": 1, "maxOutputTokens": 262144},
+        "gemini-4-carbon-disabled": {"disabled": True},
         "gemini-2.5-flash": {},
     }
     with patch(
@@ -203,4 +205,4 @@ def test_fetch_available_models_sends_versioned_client_user_agent_and_skips_disa
     ):
         models = TokenManager._fetch_available_models("tok")
     assert captured["user_agent"] == CODE_ASSIST_USER_AGENT
-    assert set(models) == {"gemini-4-argon-low", "gemini-2.5-flash"}
+    assert set(models) == {"gemini-4-argon-low", "gemini-4-carbon-low", "gemini-2.5-flash"}

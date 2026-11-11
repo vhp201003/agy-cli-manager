@@ -3558,10 +3558,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
         <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
           <span style="font-size: 0.72rem; color: var(--text-muted); font-family: var(--font-mono);">Quick Add:</span>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini-4-argon')">+ gemini-4-argon</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini-4-carbon')">+ gemini-4-carbon</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('claude-opus-5-5')">+ claude-opus-5-5</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('claude-sonnet-5-5')">+ claude-sonnet-5-5</button>
           <button type="button" class="card-btn" onclick="addDraftModelPoolRule('claude-sonnet-4-6')">+ claude-sonnet-4-6</button>
-          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('claude-opus-4-6-thinking')">+ claude-opus-4-6-thinking</button>
-          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini-2.5-pro')">+ gemini-2.5-pro</button>
-          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini-2.5-flash')">+ gemini-2.5-flash</button>
+          <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini-3.8-flash')">+ gemini-3.8-flash</button>
           <button type="button" class="card-btn" onclick="addDraftModelPoolRule('claude*')">+ claude*</button>
           <button type="button" class="card-btn" onclick="addDraftModelPoolRule('gemini*')">+ gemini*</button>
           <button type="button" class="card-btn" style="color:var(--accent); border-color:rgba(56,189,248,0.3);" onclick="addDraftModelPoolRule('')">+ Custom Rule</button>

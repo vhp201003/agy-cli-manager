@@ -70,18 +70,24 @@ def test_resolve_accepts_catalog_ids(live_catalog, monkeypatch):
     assert resolve_model_name("gemini-2.5-flash-latest") == "gemini-2.5-flash"
 
     # Base model IDs map onto effort-suffixed upstream entries when effort is supplied
-    cat_with_claude55 = {
+    cat_with_tiered_skus = {
         **CATALOG,
         "claude-sonnet-5-5-low": {"apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX"},
         "claude-sonnet-5-5-medium": {"apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX"},
         "claude-sonnet-5-5-high": {"apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX"},
+        "gemini-4-carbon-low": {"apiProvider": "API_PROVIDER_GOOGLE_GEMINI", "maxTokens": 1048576, "maxOutputTokens": 262144},
+        "gemini-4-carbon-medium": {"apiProvider": "API_PROVIDER_GOOGLE_GEMINI", "maxTokens": 1048576, "maxOutputTokens": 262144},
+        "gemini-4-carbon-high": {"apiProvider": "API_PROVIDER_GOOGLE_GEMINI", "maxTokens": 1048576, "maxOutputTokens": 262144},
     }
-    monkeypatch.setattr(fastapi_app.tm_instance, "get_model_catalog", lambda force=False: dict(cat_with_claude55))
+    monkeypatch.setattr(fastapi_app.tm_instance, "get_model_catalog", lambda force=False: dict(cat_with_tiered_skus))
     assert resolve_model_name("claude-sonnet-5-5", effort="low") == "claude-sonnet-5-5-low"
     assert resolve_model_name("claude-sonnet-5-5", effort="medium") == "claude-sonnet-5-5-medium"
     assert resolve_model_name("claude-sonnet-5-5", effort="high") == "claude-sonnet-5-5-high"
     assert resolve_model_name("claude-sonnet-5-5") == "claude-sonnet-5-5-high"
-
+    assert resolve_model_name("gemini-4-carbon", effort="low") == "gemini-4-carbon-low"
+    assert resolve_model_name("gemini-4-carbon", effort="medium") == "gemini-4-carbon-medium"
+    assert resolve_model_name("gemini-4-carbon", effort="high") == "gemini-4-carbon-high"
+    assert resolve_model_name("gemini-4-carbon") == "gemini-4-carbon-high"
 
 def test_resolve_accepts_operator_declared_pool_models(live_catalog):
     # An explicit model_pools entry declares the model served by a chosen account set.
