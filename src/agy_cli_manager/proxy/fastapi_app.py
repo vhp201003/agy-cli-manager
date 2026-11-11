@@ -2964,7 +2964,35 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
     }
 
-    function copyCurrentModalContent(btn) {
+    async function copyTextToClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (_) {}
+      }
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      ta.style.left = '-9999px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      let ok = false;
+      try {
+        ok = document.execCommand('copy');
+      } catch (_) {
+        ok = false;
+      }
+      document.body.removeChild(ta);
+      return ok;
+    }
+
+    async function copyCurrentModalContent(btn) {
       if (!currentModalEvt) return;
       let textToCopy = "";
       if (currentModalActiveTab === 'request') {
@@ -2980,11 +3008,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           latency_ms: currentModalEvt.latency_ms
         }, null, 2);
       }
-      navigator.clipboard.writeText(textToCopy);
+      const ok = await copyTextToClipboard(textToCopy);
       const span = btn.querySelector('span');
-      const oldText = span.innerText;
-      span.innerText = "Copied!";
-      setTimeout(() => { span.innerText = oldText; }, 1500);
+      if (!span) return;
+      if (!btn.dataset.origText) btn.dataset.origText = span.innerText;
+      span.innerText = ok ? "Copied!" : "Copy failed";
+      setTimeout(() => { span.innerText = btn.dataset.origText; }, 1500);
     }
 
     function appendLogRow(evt, isNew = true) {
@@ -3377,13 +3406,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       if (modal) modal.style.display = 'none';
     }
 
-    function copyConnectCmd(btn) {
-      const text = document.getElementById('connectCmdText').innerText;
-      navigator.clipboard.writeText(text).then(() => {
-        const orig = btn.innerText;
-        btn.innerText = 'Copied!';
-        setTimeout(() => btn.innerText = orig, 1800);
-      });
+    async function copyConnectCmd(btn) {
+      const elem = document.getElementById('connectCmdText');
+      const text = elem ? elem.innerText : '';
+      const ok = await copyTextToClipboard(text);
+      if (!ok && elem && window.getSelection) {
+        const range = document.createRange();
+        range.selectNodeContents(elem);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      if (!btn.dataset.origText) btn.dataset.origText = btn.innerText;
+      btn.innerText = ok ? 'Copied!' : 'Selected (Ctrl+C)';
+      setTimeout(() => { btn.innerText = btn.dataset.origText; }, 1800);
     }
 
     function renderModelPoolsPill(pools) {
